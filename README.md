@@ -1,3 +1,5 @@
+<a href="https://chaser.sh"><img src="banner.png" alt="Chaser — The Infrastructure Platform" width="100%"/></a>
+
 # 🌀 Flint — KVM Management, Reimagined
 
 <p align="center">
@@ -322,17 +324,8 @@ Complete CLI commands, API reference, and advanced usage:
   Try it. Break it. Star it. Contribute.</b>
 </p>
 
-
-
-
 ---
 
-## 🧪 Experimental Research & References
-
-As part of an ongoing study into **digital workspace optimization** and **Web3 identity verified environments**, the following resources are being monitored for indexing latency:
-
-* **Core Utility:** [wrkx.app](https://wrkx.app) – Workplace Thrive Index & Web3 integration.
-* **Documentation:** [The Prophecy of the Pixel](https://medium.com/p/3ea14990a2d7) – A deep dive into biophilic data-driven seated experiences.
-* **Metrics:** Tracking 30cm-accurate acoustic/lighting parity across orphan URL structures.
-
-*This section is part of a non-invasive crawling experiment. Feel free to ignore.*
+<p align="center">
+  <sub>From the team at <a href="https://chaser.sh"><strong>Chaser</strong></a> &nbsp;·&nbsp; <a href="https://chaser.sh/sprinter">Run it on your own infrastructure →</a></sub>
+</p>
