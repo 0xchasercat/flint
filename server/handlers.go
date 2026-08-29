@@ -2,14 +2,12 @@ package server
 
 import (
 	"bufio"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"github.com/volantvm/flint/pkg/core"
-	"github.com/volantvm/flint/pkg/imagerepository"
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
+	"github.com/volantvm/flint/pkg/core"
+	"github.com/volantvm/flint/pkg/imagerepository"
 	"io"
 	"log"
 	"net"
@@ -24,6 +22,8 @@ import (
 	"sync"
 	"time"
 )
+
+var linuxInterfaceNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_.-]+$`)
 
 func (s *Server) handleGetVMs() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -110,13 +110,13 @@ func (s *Server) handleDeleteVMSnapshot() http.HandlerFunc {
 func (s *Server) handleGetRepositoryImages() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		images := s.imageRepo.GetImages()
-		
+
 		// Add download status to each image
 		type ImageWithStatus struct {
 			imagerepository.CloudImage
 			Downloaded bool `json:"downloaded"`
 		}
-		
+
 		var imagesWithStatus []ImageWithStatus
 		for _, img := range images {
 			imagesWithStatus = append(imagesWithStatus, ImageWithStatus{
@@ -124,7 +124,7 @@ func (s *Server) handleGetRepositoryImages() http.HandlerFunc {
 				Downloaded: s.imageRepo.IsImageDownloaded(img.ID),
 			})
 		}
-		
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(imagesWithStatus)
 	}
@@ -152,12 +152,12 @@ func (s *Server) handleDownloadRepositoryImage() http.HandlerFunc {
 					lastProgress = progress
 				}
 			})
-			
+
 			if err != nil {
 				fmt.Printf("Download failed for %s: %v\n", imageID, err)
 			} else {
 				fmt.Printf("Download completed for %s\n", imageID)
-				
+
 				// Import the downloaded image into the main image library
 				downloadedPath := s.imageRepo.GetDownloadedImagePath(imageID)
 				if downloadedPath != "" {
@@ -191,7 +191,7 @@ func (s *Server) handleGetDownloadStatus() http.HandlerFunc {
 		}
 
 		downloaded := s.imageRepo.IsImageDownloaded(imageID)
-		
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"imageId":    imageID,
@@ -359,15 +359,12 @@ func (s *Server) handleHealthCheck() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Check libvirt connectivity
 		libvirtHealthy := true
-		libvirtError := ""
 		if err := s.checkLibvirtHealth(); err != nil {
 			libvirtHealthy = false
-			libvirtError = err.Error()
 		}
 
-		// Get system metrics
-		hostStatus, hostErr := s.client.GetHostStatus()
-		hostResources, resourcesErr := s.client.GetHostResources()
+		_, hostErr := s.client.GetHostStatus()
+		_, resourcesErr := s.client.GetHostResources()
 
 		health := map[string]interface{}{
 			"status":         s.calculateOverallHealth(libvirtHealthy, hostErr, resourcesErr),
@@ -377,7 +374,6 @@ func (s *Server) handleHealthCheck() http.HandlerFunc {
 			"checks": map[string]interface{}{
 				"libvirt": map[string]interface{}{
 					"healthy": libvirtHealthy,
-					"error":   libvirtError,
 				},
 				"host_status": map[string]interface{}{
 					"healthy": hostErr == nil,
@@ -388,27 +384,6 @@ func (s *Server) handleHealthCheck() http.HandlerFunc {
 					"error":   "",
 				},
 			},
-		}
-
-		// Add host info if available
-		if hostErr == nil {
-			health["host"] = map[string]interface{}{
-				"hostname":           hostStatus.Hostname,
-				"hypervisor_version": hostStatus.HypervisorVersion,
-				"total_vms":          hostStatus.TotalVMs,
-				"running_vms":        hostStatus.RunningVMs,
-			}
-		}
-
-		// Add resource info if available
-		if resourcesErr == nil {
-			health["resources"] = map[string]interface{}{
-				"total_memory_kb": hostResources.TotalMemoryKB,
-				"free_memory_kb":  hostResources.FreeMemoryKB,
-				"cpu_cores":       hostResources.CPUCores,
-				"storage_total_b": hostResources.StorageTotalB,
-				"storage_used_b":  hostResources.StorageUsedB,
-			}
 		}
 
 		statusCode := http.StatusOK
@@ -435,14 +410,6 @@ func (s *Server) calculateOverallHealth(libvirtHealthy bool, hostErr, resourcesE
 		return "unhealthy"
 	}
 	return "healthy"
-}
-
-func (s *Server) handleGetAPIKey() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		// Return API key for easy setup - use with caution in production
-		w.Header().Set("Content-Type", "text/plain")
-		w.Write([]byte(s.apiKey))
-	}
 }
 
 func (s *Server) handleGetImages() http.HandlerFunc {
@@ -507,9 +474,8 @@ func (s *Server) handleDownloadImage() http.HandlerFunc {
 			return
 		}
 
-		// Only allow HTTP and HTTPS URLs
-		if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
-			http.Error(w, `{"error": "Only HTTP and HTTPS URLs are allowed"}`, http.StatusBadRequest)
+		if err := validateDownloadURL(parsedURL); err != nil {
+			http.Error(w, `{"error": "URL destination is not allowed"}`, http.StatusBadRequest)
 			return
 		}
 
@@ -528,8 +494,13 @@ func (s *Server) handleDownloadImage() http.HandlerFunc {
 			}
 		}
 
-		// Create temporary file
-		tempFile, err := os.CreateTemp("", "flint-download-*-"+filename)
+		filename = filepath.Base(filename)
+		if filename == "." || filename == string(filepath.Separator) {
+			filename = "downloaded-image"
+		}
+
+		// Create temporary file without including untrusted input in the path pattern.
+		tempFile, err := os.CreateTemp("", "flint-download-*")
 		if err != nil {
 			http.Error(w, `{"error": "Failed to create temporary file: `+err.Error()+`"}`, http.StatusInternalServerError)
 			return
@@ -538,7 +509,7 @@ func (s *Server) handleDownloadImage() http.HandlerFunc {
 		defer tempFile.Close()
 
 		// Download the file
-		resp, err := http.Get(req.URL)
+		resp, err := safeHTTPClient().Get(req.URL)
 		if err != nil {
 			http.Error(w, `{"error": "Failed to download file: `+err.Error()+`"}`, http.StatusInternalServerError)
 			return
@@ -550,11 +521,19 @@ func (s *Server) handleDownloadImage() http.HandlerFunc {
 			http.Error(w, `{"error": "Failed to download file: HTTP `+strconv.Itoa(resp.StatusCode)+`"}`, http.StatusInternalServerError)
 			return
 		}
+		if resp.ContentLength > maxDownloadSize {
+			http.Error(w, `{"error": "Download exceeds the 10 GiB limit"}`, http.StatusRequestEntityTooLarge)
+			return
+		}
 
-		// Copy the downloaded content to the temporary file
-		_, err = io.Copy(tempFile, resp.Body)
+		// Limit streaming responses even when Content-Length is absent or false.
+		written, err := io.Copy(tempFile, io.LimitReader(resp.Body, maxDownloadSize+1))
 		if err != nil {
 			http.Error(w, `{"error": "Failed to save downloaded file: `+err.Error()+`"}`, http.StatusInternalServerError)
+			return
+		}
+		if written > maxDownloadSize {
+			http.Error(w, `{"error": "Download exceeds the 10 GiB limit"}`, http.StatusRequestEntityTooLarge)
 			return
 		}
 
@@ -572,13 +551,6 @@ func (s *Server) handleDownloadImage() http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(image)
 	}
-}
-
-// generateSecureToken generates a secure random token for WebSocket authentication
-func generateSecureToken() string {
-	bytes := make([]byte, 32)
-	rand.Read(bytes)
-	return hex.EncodeToString(bytes)
 }
 
 func (s *Server) handleGetISOs() http.HandlerFunc {
@@ -618,22 +590,19 @@ func (s *Server) handleGetVMPerformance() http.HandlerFunc {
 func (s *Server) handleGetVMSerialConsole() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		uuid := chi.URLParam(r, "uuid")
-
-		// Debug: Log API key length
-		fmt.Printf("DEBUG: API key length: %d\n", len(s.apiKey))
-		if s.apiKey == "" {
-			fmt.Printf("DEBUG: API key is empty! Generating new one...\n")
-			// Generate API key directly here since method might not be accessible
-			bytes := make([]byte, 32)
-			rand.Read(bytes)
-			s.apiKey = hex.EncodeToString(bytes)
-			fmt.Printf("DEBUG: Generated API key length: %d\n", len(s.apiKey))
+		if err := validateUUID(uuid); err != nil {
+			sendError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		token, err := s.issueConsoleToken(uuid, "serial")
+		if err != nil {
+			sendInternalError(w, err)
+			return
 		}
 
-		// Use the server's API key for WebSocket authentication
 		response := map[string]string{
 			"websocket_path": fmt.Sprintf("/api/vms/%s/serial-console/ws", uuid),
-			"token":          s.apiKey,
+			"token":          token,
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -696,22 +665,14 @@ func (s *Server) handleVMSerialConsoleWS() http.HandlerFunc {
 			return
 		}
 
-		// Validate the token against the server's API key
-		if token != s.apiKey {
+		if !s.consumeConsoleToken(token, uuid, "serial") {
 			http.Error(w, "Invalid authentication token", http.StatusUnauthorized)
 			return
 		}
 
 		// Upgrade HTTP connection to WebSocket
 		upgrader := websocket.Upgrader{
-			CheckOrigin: func(r *http.Request) bool {
-				origin := r.Header.Get("Origin")
-				if origin == "" {
-					return true
-				}
-
-				return true
-			},
+			CheckOrigin: sameWebSocketOrigin,
 		}
 
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -727,9 +688,19 @@ func (s *Server) handleVMSerialConsoleWS() http.HandlerFunc {
 			conn.WriteMessage(websocket.TextMessage, []byte("Error: "+err.Error()))
 			return
 		}
+		cleanPTYPath := filepath.Clean(ptyPath)
+		if !strings.HasPrefix(cleanPTYPath, "/dev/pts/") {
+			conn.WriteMessage(websocket.TextMessage, []byte("Error: invalid PTY path"))
+			return
+		}
+		info, err := os.Stat(cleanPTYPath)
+		if err != nil || info.Mode()&os.ModeCharDevice == 0 {
+			conn.WriteMessage(websocket.TextMessage, []byte("Error: invalid PTY device"))
+			return
+		}
 
 		// Open the PTY device
-		ptyFile, err := os.OpenFile(ptyPath, os.O_RDWR, 0)
+		ptyFile, err := os.OpenFile(cleanPTYPath, os.O_RDWR, 0)
 		if err != nil {
 			conn.WriteMessage(websocket.TextMessage, []byte("Error opening PTY: "+err.Error()))
 			return
@@ -921,6 +892,13 @@ func validateCloudInitConfig(cfg *core.CloudInitConfig) error {
 		}
 	}
 
+	if len(cfg.CommonFields.Password) > 256 {
+		return fmt.Errorf("password must be 256 characters or less")
+	}
+	if strings.ContainsAny(cfg.CommonFields.Password, "\r\n\x00") {
+		return fmt.Errorf("password cannot contain control characters")
+	}
+
 	if len(cfg.CommonFields.Packages) > 50 {
 		return fmt.Errorf("cannot specify more than 50 packages")
 	}
@@ -950,21 +928,50 @@ func validateUUID(uuid string) error {
 	return nil
 }
 
+func validInterfaceName(name string) bool {
+	if len(name) == 0 || len(name) > 15 || strings.HasPrefix(name, "-") {
+		return false
+	}
+	return linuxInterfaceNamePattern.MatchString(name)
+}
+
 // validateFilePath validates file path for security
 func validateFilePath(path string) error {
+	return validateFilePathWithin(path, []string{
+		"/var/lib/flint/images",
+		"/var/lib/flint/image-repository",
+		"/var/lib/libvirt/images",
+	})
+}
+
+func validateFilePathWithin(path string, allowedRoots []string) error {
 	if path == "" {
 		return fmt.Errorf("file path is required")
 	}
 	if len(path) > 4096 {
 		return fmt.Errorf("file path is too long")
 	}
-	// Prevent directory traversal
-	if strings.Contains(path, "..") {
-		return fmt.Errorf("file path cannot contain '..'")
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("file path must be absolute")
 	}
-	// Basic path validation
-	if !filepath.IsAbs(path) && !strings.HasPrefix(path, "./") && !strings.HasPrefix(path, "/") {
-		return fmt.Errorf("file path must be absolute or start with './'")
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return fmt.Errorf("file path does not exist")
+	}
+	info, err := os.Stat(resolved)
+	if err != nil || !info.Mode().IsRegular() {
+		return fmt.Errorf("file path must reference a regular file")
+	}
+	allowed := false
+	for _, root := range allowedRoots {
+		rel, relErr := filepath.Rel(root, resolved)
+		if relErr == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return fmt.Errorf("file must be inside an approved image directory")
 	}
 	return nil
 }
@@ -989,16 +996,6 @@ func (s *Server) handleCreateVM() http.HandlerFunc {
 		if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
 			http.Error(w, `{"error": "Invalid JSON in request body"}`, http.StatusBadRequest)
 			return
-		}
-
-		// Debug: Log the received cloud-init config
-		if cfg.CloudInit != nil {
-			fmt.Printf("DEBUG: CloudInit received - Username: %s, Password: %s, Hostname: %s\n", 
-				cfg.CloudInit.CommonFields.Username, 
-				cfg.CloudInit.CommonFields.Password, 
-				cfg.CloudInit.CommonFields.Hostname)
-		} else {
-			fmt.Printf("DEBUG: CloudInit is nil\n")
 		}
 
 		// Validate input
@@ -1067,6 +1064,10 @@ func (s *Server) handleUpdateVolume() http.HandlerFunc {
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, `{"error": "Invalid JSON in request body"}`, http.StatusBadRequest)
+			return
+		}
+		if req.SizeGB <= 0 || req.SizeGB > 16384 {
+			http.Error(w, `{"error": "size_gb must be between 1 and 16384"}`, http.StatusBadRequest)
 			return
 		}
 
@@ -1141,9 +1142,19 @@ func (s *Server) handleCreateBridge() http.HandlerFunc {
 			return
 		}
 
-		if req.Name == "" {
-			http.Error(w, `{"error": "Bridge name is required"}`, http.StatusBadRequest)
+		if !validInterfaceName(req.Name) {
+			http.Error(w, `{"error": "Invalid bridge name"}`, http.StatusBadRequest)
 			return
+		}
+		if len(req.Ports) > 64 {
+			http.Error(w, `{"error": "Too many bridge ports"}`, http.StatusBadRequest)
+			return
+		}
+		for _, port := range req.Ports {
+			if !validInterfaceName(port) {
+				http.Error(w, `{"error": "Invalid bridge port name"}`, http.StatusBadRequest)
+				return
+			}
 		}
 
 		// Create the bridge
@@ -1203,7 +1214,7 @@ func (s *Server) handleAttachDiskToVM() http.HandlerFunc {
 func (s *Server) handleAttachNetworkInterfaceToVM() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		uuid := chi.URLParam(r, "uuid")
-		
+
 		// Support both old and new request formats
 		var req struct {
 			// Old format
@@ -1498,19 +1509,25 @@ func (s *Server) handleDeleteImage() http.HandlerFunc {
 func (s *Server) handleGetVMVNCInfo() http.HandlerFunc {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		uuid := chi.URLParam(r, "uuid")
-		if uuid == "" {
-			http.Error(w, `{"error": "VM UUID is required"}`, http.StatusBadRequest)
+		if err := validateUUID(uuid); err != nil {
+			sendError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-
-		vncInfo, err := s.client.GetVMVNCInfo(uuid)
+		if _, err := s.client.GetVMVNCInfo(uuid); err != nil {
+			http.Error(w, `{"error": "Failed to get VNC info"}`, http.StatusInternalServerError)
+			return
+		}
+		token, err := s.issueConsoleToken(uuid, "vnc")
 		if err != nil {
-			http.Error(w, fmt.Sprintf(`{"error": "Failed to get VNC info: %s"}`, err.Error()), http.StatusInternalServerError)
+			sendInternalError(w, err)
 			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(vncInfo)
+		json.NewEncoder(w).Encode(map[string]string{
+			"websocket_path": fmt.Sprintf("/api/vms/%s/vnc/ws", uuid),
+			"token":          token,
+		})
 	})
 }
 
@@ -1526,8 +1543,7 @@ func (s *Server) handleVMVNCWebSocket() http.HandlerFunc {
 			return
 		}
 
-		// Validate the token against the server's API key
-		if token != s.apiKey {
+		if !s.consumeConsoleToken(token, uuid, "vnc") {
 			http.Error(w, "Invalid authentication token", http.StatusUnauthorized)
 			return
 		}
@@ -1541,9 +1557,7 @@ func (s *Server) handleVMVNCWebSocket() http.HandlerFunc {
 
 		// Upgrade HTTP connection to WebSocket
 		upgrader := websocket.Upgrader{
-			CheckOrigin: func(r *http.Request) bool {
-				return true // Allow all origins for VNC (authenticated via token)
-			},
+			CheckOrigin: sameWebSocketOrigin,
 		}
 
 		wsConn, err := upgrader.Upgrade(w, r, nil)
@@ -1554,7 +1568,7 @@ func (s *Server) handleVMVNCWebSocket() http.HandlerFunc {
 		defer wsConn.Close()
 
 		// Connect to VNC server
-		vncAddr := fmt.Sprintf("%s:%s", vncInfo.Host, vncInfo.Port)
+		vncAddr := net.JoinHostPort(vncInfo.Host, vncInfo.Port)
 		vncConn, err := net.Dial("tcp", vncAddr)
 		if err != nil {
 			log.Printf("Failed to connect to VNC server at %s: %v", vncAddr, err)

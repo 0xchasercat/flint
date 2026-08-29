@@ -1,0 +1,12 @@
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Ignore generated frontend files and documented placeholders"
+paths = [
+  '''(^|/)web/(node_modules|\.next|out)/''',
+  '''(^|/)\.git/''',
+]
+regexes = [
+  '''YOUR_API_KEY''',
+]

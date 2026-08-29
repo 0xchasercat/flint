@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -11,6 +12,7 @@ import (
 
 // Config represents the application configuration
 type Config struct {
+	APIKey   string         `json:"api_key,omitempty"`
 	Server   ServerConfig   `json:"server"`
 	Security SecurityConfig `json:"security"`
 	Libvirt  LibvirtConfig  `json:"libvirt"`
@@ -34,11 +36,11 @@ type SecurityConfig struct {
 
 // LibvirtConfig represents libvirt-related configuration
 type LibvirtConfig struct {
-	URI           string              `json:"uri"`
-	ISOPool       string              `json:"iso_pool"`
-	TemplatePool  string              `json:"template_pool"`
-	ImagePoolPath string              `json:"image_pool_path"`
-	SSH           LibvirtSSHConfig    `json:"ssh"`
+	URI           string           `json:"uri"`
+	ISOPool       string           `json:"iso_pool"`
+	TemplatePool  string           `json:"template_pool"`
+	ImagePoolPath string           `json:"image_pool_path"`
+	SSH           LibvirtSSHConfig `json:"ssh"`
 }
 
 // LibvirtSSHConfig represents SSH-specific configuration for remote libvirt connections
@@ -63,7 +65,7 @@ type LoggingConfig struct {
 func DefaultConfig() *Config {
 	return &Config{
 		Server: ServerConfig{
-			Host:         "0.0.0.0",
+			Host:         "127.0.0.1",
 			Port:         5550,
 			ReadTimeout:  30,
 			WriteTimeout: 30,
@@ -132,12 +134,22 @@ func loadFromFile(config *Config, path string) error {
 // loadFromEnv loads configuration from environment variables
 func loadFromEnv(config *Config) {
 	// Server configuration
-	if host := os.Getenv("FLINT_SERVER_HOST"); host != "" {
+	host := os.Getenv("FLINT_BIND_ADDRESS")
+	if host == "" {
+		host = os.Getenv("FLINT_SERVER_HOST")
+	}
+	if host != "" {
 		config.Server.Host = host
 	}
-	if port := os.Getenv("FLINT_SERVER_PORT"); port != "" {
+	port := os.Getenv("FLINT_BIND_PORT")
+	if port == "" {
+		port = os.Getenv("FLINT_SERVER_PORT")
+	}
+	if port != "" {
 		if p, err := strconv.Atoi(port); err == nil {
 			config.Server.Port = p
+		} else {
+			config.Server.Port = 0
 		}
 	}
 	if readTimeout := os.Getenv("FLINT_SERVER_READ_TIMEOUT"); readTimeout != "" {
@@ -210,20 +222,47 @@ func loadFromEnv(config *Config) {
 
 // SaveConfig saves the configuration to a file
 func (c *Config) SaveConfig(path string) error {
-	file, err := os.Create(path)
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	if err := os.Chmod(dir, 0700); err != nil {
+		return err
+	}
+
+	file, err := os.CreateTemp(dir, ".config-*.json")
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	tempPath := file.Name()
+	defer os.Remove(tempPath)
+	if err := file.Chmod(0600); err != nil {
+		file.Close()
+		return err
+	}
 
 	encoder := json.NewEncoder(file)
 	encoder.SetIndent("", "  ")
-	return encoder.Encode(c)
+	if err := encoder.Encode(c); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tempPath, path); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0600)
 }
 
 // GetServerAddress returns the full server address
 func (c *Config) GetServerAddress() string {
-	return fmt.Sprintf("%s:%d", c.Server.Host, c.Server.Port)
+	return net.JoinHostPort(c.Server.Host, strconv.Itoa(c.Server.Port))
 }
 
 // Validate validates the configuration

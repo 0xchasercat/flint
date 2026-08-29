@@ -3,7 +3,10 @@ package server
 import (
 	"embed"
 	"github.com/volantvm/flint/pkg/libvirtclient"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 //go:embed testdata/*
@@ -29,6 +32,49 @@ func TestServer_GetAPIKey(t *testing.T) {
 	// API key should be 64 characters (32 bytes hex encoded)
 	if len(apiKey) != 64 {
 		t.Errorf("GetAPIKey() returned string of length %d, expected 64", len(apiKey))
+	}
+}
+
+func TestConsoleTokenIsBoundAndSingleUse(t *testing.T) {
+	s := &Server{consoleTokens: make(map[string]consoleToken)}
+	token, err := s.issueConsoleToken("vm-1", "serial")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.consumeConsoleToken(token, "vm-2", "serial") {
+		t.Fatal("token accepted for another VM")
+	}
+
+	token, err = s.issueConsoleToken("vm-1", "serial")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.consumeConsoleToken(token, "vm-1", "serial") {
+		t.Fatal("valid token rejected")
+	}
+	if s.consumeConsoleToken(token, "vm-1", "serial") {
+		t.Fatal("one-time token was accepted twice")
+	}
+
+	expiredToken := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	s.consoleTokens[expiredToken] = consoleToken{VMUUID: "vm-1", Kind: "serial", Expiry: time.Now().Add(-time.Second)}
+	if s.consumeConsoleToken(expiredToken, "vm-1", "serial") {
+		t.Fatal("expired token accepted")
+	}
+}
+
+func TestConsoleMetadataRequiresAuthentication(t *testing.T) {
+	client, err := libvirtclient.NewClient("test:///default", "isos", "templates")
+	if err != nil {
+		t.Skip("libvirt test driver unavailable")
+	}
+	defer client.Close()
+	s := NewServer(client, testAssets)
+	req := httptest.NewRequest(http.MethodGet, "/api/vms/550e8400-e29b-41d4-a716-446655440000/serial-console", nil)
+	recorder := httptest.NewRecorder()
+	s.router.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusUnauthorized)
 	}
 }
 

@@ -3,8 +3,8 @@ package libvirtclient
 import (
 	"encoding/xml"
 	"fmt"
-	"github.com/volantvm/flint/pkg/core"
 	libvirt "github.com/libvirt/libvirt-go"
+	"github.com/volantvm/flint/pkg/core"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -122,7 +122,7 @@ func (c *Client) CreateVM(cfg core.VMCreationConfig) (core.VM_Detailed, error) {
 
 	// Step 2: Create the main disk volume for the VM
 	var diskName string
-	
+
 	if cfg.ImageType == "template" && sourcePath != "" {
 		diskName = fmt.Sprintf("%s-disk-0.qcow2", cfg.Name)
 		volCfg := core.VolumeConfig{
@@ -132,30 +132,30 @@ func (c *Client) CreateVM(cfg core.VMCreationConfig) (core.VM_Detailed, error) {
 		if err := c.CreateVolume(flintImagePoolName, volCfg); err != nil {
 			return core.VM_Detailed{}, fmt.Errorf("could not create vm disk volume: %w", err)
 		}
-		
+
 		// Copy the template image to the new volume
 		pool, err := c.conn.LookupStoragePoolByName(flintImagePoolName)
 		if err != nil {
 			return core.VM_Detailed{}, fmt.Errorf("lookup pool: %w", err)
 		}
 		defer pool.Free()
-		
+
 		vol, err := pool.LookupStorageVolByName(diskName)
 		if err != nil {
 			return core.VM_Detailed{}, fmt.Errorf("lookup volume: %w", err)
 		}
 		defer vol.Free()
-		
+
 		volPath, err := vol.GetPath()
 		if err != nil {
 			return core.VM_Detailed{}, fmt.Errorf("get volume path: %w", err)
 		}
-		
+
 		// Use qemu-img to create a copy with the template as backing file
 		if err := exec.Command("qemu-img", "create", "-f", "qcow2", "-F", "qcow2", "-b", sourcePath, volPath).Run(); err != nil {
 			return core.VM_Detailed{}, fmt.Errorf("failed to create disk from template: %w", err)
 		}
-		
+
 		// Resize the disk to the requested size
 		if err := exec.Command("qemu-img", "resize", volPath, fmt.Sprintf("%dG", cfg.DiskSizeGB)).Run(); err != nil {
 			fmt.Printf("Warning: Failed to resize disk: %v\n", err)
@@ -296,7 +296,7 @@ func buildDomainXML(cfg core.VMCreationConfig, diskVolumeName string, sourcePath
 		d.Devices.Disks = append(d.Devices.Disks, osDisk)
 		d.OS.Boot.Dev = "hd" // Boot from hard disk
 	}
-	
+
 	// Add main disk for ISO VMs (for OS installation)
 	if cfg.ImageType == "iso" && diskVolumeName != "" {
 		mainDisk := struct {
@@ -334,7 +334,7 @@ func buildDomainXML(cfg core.VMCreationConfig, diskVolumeName string, sourcePath
 		}
 		d.Devices.Disks = append(d.Devices.Disks, mainDisk)
 	}
-	
+
 	// Add ISO as CDROM for ISO VMs
 	if cfg.ImageType == "iso" && sourcePath != "" {
 		// Use ISO as CDROM
@@ -438,20 +438,20 @@ func createCloudInitISO(conn *libvirt.Connect, userData, vmName string) (string,
 
 	// Write user data to file
 	userDataPath := filepath.Join(tempDir, "user-data")
-	if err := os.WriteFile(userDataPath, []byte(userData), 0644); err != nil {
+	if err := os.WriteFile(userDataPath, []byte(userData), 0600); err != nil {
 		return "", fmt.Errorf("failed to write user data: %w", err)
 	}
 
 	// Create meta-data file (minimal)
 	metaDataPath := filepath.Join(tempDir, "meta-data")
 	metaData := fmt.Sprintf("instance-id: %s\nlocal-hostname: %s\n", vmName, vmName)
-	if err := os.WriteFile(metaDataPath, []byte(metaData), 0644); err != nil {
+	if err := os.WriteFile(metaDataPath, []byte(metaData), 0600); err != nil {
 		return "", fmt.Errorf("failed to write meta data: %w", err)
 	}
 
 	// Create ISO in the flint images directory (accessible to libvirt)
 	isoPath := fmt.Sprintf("%s/%s-cloudinit.iso", flintImagePoolPath, vmName)
-	
+
 	// Try xorriso first (better long filename support)
 	cmd := exec.Command("xorriso", "-as", "mkisofs", "-output", isoPath, "-volid", "cidata", "-joliet", "-rock", tempDir)
 	if err := cmd.Run(); err != nil {
@@ -465,7 +465,7 @@ func createCloudInitISO(conn *libvirt.Connect, userData, vmName string) (string,
 			}
 		}
 	}
-	
+
 	// Fix permissions for libvirt access (inherit from parent directory)
 	if parentInfo, err := os.Stat(flintImagePoolPath); err == nil {
 		if stat, ok := parentInfo.Sys().(*syscall.Stat_t); ok {
@@ -474,7 +474,7 @@ func createCloudInitISO(conn *libvirt.Connect, userData, vmName string) (string,
 			}
 		}
 	}
-	if err := os.Chmod(isoPath, 0644); err != nil {
+	if err := os.Chmod(isoPath, 0600); err != nil {
 		fmt.Printf("Warning: Failed to set cloud-init ISO permissions: %v\n", err)
 	}
 
@@ -559,10 +559,10 @@ func addDiskToXML(existingXML, diskXML string) (string, error) {
 	if devicesEndIndex == -1 {
 		return "", fmt.Errorf("could not find </devices> tag in domain XML")
 	}
-	
+
 	// Insert the new disk XML before the closing </devices> tag
 	updatedXML := xmlStr[:devicesEndIndex] + diskXML + "\n  " + xmlStr[devicesEndIndex:]
-	
+
 	return updatedXML, nil
 }
 
@@ -731,31 +731,31 @@ func addCloudInitDiskToXML(conn *libvirt.Connect, dom *libvirt.Domain, diskPath 
 func addNoCloudDataSource(conn *libvirt.Connect, dom *libvirt.Domain, userData, vmName string) error {
 	// Create meta-data content
 	metaData := fmt.Sprintf("instance-id: %s\nlocal-hostname: %s\n", vmName, vmName)
-	
+
 	// Create cloud-init files in the storage directory
 	cloudInitDir := filepath.Join(flintImagePoolPath, fmt.Sprintf("%s-cloudinit", vmName))
-	if err := os.MkdirAll(cloudInitDir, 0755); err != nil {
+	if err := os.MkdirAll(cloudInitDir, 0700); err != nil {
 		return fmt.Errorf("failed to create cloud-init directory: %w", err)
 	}
-	
+
 	// Write user-data file
 	userDataPath := filepath.Join(cloudInitDir, "user-data")
-	if err := os.WriteFile(userDataPath, []byte(userData), 0644); err != nil {
+	if err := os.WriteFile(userDataPath, []byte(userData), 0600); err != nil {
 		return fmt.Errorf("failed to write user-data: %w", err)
 	}
-	
+
 	// Write meta-data file
 	metaDataPath := filepath.Join(cloudInitDir, "meta-data")
-	if err := os.WriteFile(metaDataPath, []byte(metaData), 0644); err != nil {
+	if err := os.WriteFile(metaDataPath, []byte(metaData), 0600); err != nil {
 		return fmt.Errorf("failed to write meta-data: %w", err)
 	}
-	
+
 	// Create vendor-data file (empty but required)
 	vendorDataPath := filepath.Join(cloudInitDir, "vendor-data")
-	if err := os.WriteFile(vendorDataPath, []byte(""), 0644); err != nil {
+	if err := os.WriteFile(vendorDataPath, []byte(""), 0600); err != nil {
 		return fmt.Errorf("failed to write vendor-data: %w", err)
 	}
-	
+
 	// Fix permissions for libvirt access
 	if parentInfo, err := os.Stat(flintImagePoolPath); err == nil {
 		if stat, ok := parentInfo.Sys().(*syscall.Stat_t); ok {
@@ -765,33 +765,33 @@ func addNoCloudDataSource(conn *libvirt.Connect, dom *libvirt.Domain, userData, 
 			}
 		}
 	}
-	
+
 	// Get current domain XML
 	xmlDesc, err := dom.GetXMLDesc(0)
 	if err != nil {
 		return fmt.Errorf("failed to get domain XML: %w", err)
 	}
-	
+
 	// Add SMBIOS configuration for NoCloud datasource
 	smbiosXML := fmt.Sprintf(`  <sysinfo type='smbios'>
     <system>
       <entry name='serial'>ds=nocloud;s=file://%s/</entry>
     </system>
   </sysinfo>`, cloudInitDir)
-	
+
 	// Add sysinfo to domain XML
 	updatedXML, err := addSysInfoToXML(xmlDesc, smbiosXML)
 	if err != nil {
 		return fmt.Errorf("failed to update domain XML: %w", err)
 	}
-	
+
 	// Redefine domain
 	newDom, err := conn.DomainDefineXML(updatedXML)
 	if err != nil {
 		return fmt.Errorf("failed to redefine domain: %w", err)
 	}
 	newDom.Free()
-	
+
 	return nil
 }
 
@@ -803,11 +803,11 @@ func addSysInfoToXML(existingXML, sysInfoXML string) (string, error) {
 	if osEndIndex == -1 {
 		return "", fmt.Errorf("could not find </os> tag in domain XML")
 	}
-	
+
 	// Insert the sysinfo XML after the </os> tag
 	insertPoint := osEndIndex + len("</os>")
 	updatedXML := xmlStr[:insertPoint] + "\n" + sysInfoXML + xmlStr[insertPoint:]
-	
+
 	return updatedXML, nil
 }
 
@@ -815,49 +815,49 @@ func addSysInfoToXML(existingXML, sysInfoXML string) (string, error) {
 func createAndAttachCloudInitISO(conn *libvirt.Connect, dom *libvirt.Domain, userData, vmName string) error {
 	// Create meta-data content
 	metaData := fmt.Sprintf("instance-id: %s\nlocal-hostname: %s\n", vmName, vmName)
-	
+
 	// Create temporary directory for cloud-init files
 	tempDir, err := os.MkdirTemp("", "cloudinit-"+vmName)
 	if err != nil {
 		return fmt.Errorf("failed to create temp directory: %w", err)
 	}
 	defer os.RemoveAll(tempDir)
-	
+
 	// Write user-data file
 	userDataPath := filepath.Join(tempDir, "user-data")
-	if err := os.WriteFile(userDataPath, []byte(userData), 0644); err != nil {
+	if err := os.WriteFile(userDataPath, []byte(userData), 0600); err != nil {
 		return fmt.Errorf("failed to write user-data: %w", err)
 	}
-	
+
 	// Write meta-data file
 	metaDataPath := filepath.Join(tempDir, "meta-data")
-	if err := os.WriteFile(metaDataPath, []byte(metaData), 0644); err != nil {
+	if err := os.WriteFile(metaDataPath, []byte(metaData), 0600); err != nil {
 		return fmt.Errorf("failed to write meta-data: %w", err)
 	}
-	
+
 	// Create vendor-data file (empty but required)
 	vendorDataPath := filepath.Join(tempDir, "vendor-data")
-	if err := os.WriteFile(vendorDataPath, []byte(""), 0644); err != nil {
+	if err := os.WriteFile(vendorDataPath, []byte(""), 0600); err != nil {
 		return fmt.Errorf("failed to write vendor-data: %w", err)
 	}
-	
+
 	// Create ISO in the flint images directory
 	isoPath := fmt.Sprintf("%s/%s-cloudinit.iso", flintImagePoolPath, vmName)
-	
+
 	// Create ISO using genisoimage with proper options for cloud-init
-	cmd := exec.Command("genisoimage", 
+	cmd := exec.Command("genisoimage",
 		"-output", isoPath,
 		"-volid", "cidata",
-		"-joliet", 
+		"-joliet",
 		"-rock",
 		"-input-charset", "utf-8",
 		tempDir)
-	
+
 	if err := cmd.Run(); err != nil {
 		// Try mkisofs as fallback
 		cmd = exec.Command("mkisofs",
 			"-output", isoPath,
-			"-volid", "cidata", 
+			"-volid", "cidata",
 			"-joliet",
 			"-rock",
 			"-input-charset", "utf-8",
@@ -866,21 +866,21 @@ func createAndAttachCloudInitISO(conn *libvirt.Connect, dom *libvirt.Domain, use
 			return fmt.Errorf("failed to create ISO: %w", err)
 		}
 	}
-	
+
 	// Fix permissions for libvirt access
 	if parentInfo, err := os.Stat(flintImagePoolPath); err == nil {
 		if stat, ok := parentInfo.Sys().(*syscall.Stat_t); ok {
 			os.Chown(isoPath, int(stat.Uid), int(stat.Gid))
 		}
 	}
-	os.Chmod(isoPath, 0644)
-	
+	os.Chmod(isoPath, 0600)
+
 	// Get current domain XML
 	xmlDesc, err := dom.GetXMLDesc(0)
 	if err != nil {
 		return fmt.Errorf("failed to get domain XML: %w", err)
 	}
-	
+
 	// Parse XML to find used devices
 	type DomainXML struct {
 		XMLName xml.Name `xml:"domain"`
@@ -892,18 +892,18 @@ func createAndAttachCloudInitISO(conn *libvirt.Connect, dom *libvirt.Domain, use
 			} `xml:"disk"`
 		} `xml:"devices"`
 	}
-	
+
 	var domain DomainXML
 	if err := xml.Unmarshal([]byte(xmlDesc), &domain); err != nil {
 		return fmt.Errorf("failed to parse domain XML: %w", err)
 	}
-	
+
 	// Find available IDE device for cloud-init
 	usedDevices := make(map[string]bool)
 	for _, disk := range domain.Devices.Disks {
 		usedDevices[disk.Target.Dev] = true
 	}
-	
+
 	cloudInitDevice := "hdc" // ide2 - preferred for cloud-init
 	if usedDevices["hdc"] {
 		cloudInitDevice = "hdd" // ide3 - fallback
@@ -911,7 +911,7 @@ func createAndAttachCloudInitISO(conn *libvirt.Connect, dom *libvirt.Domain, use
 			return fmt.Errorf("no available IDE devices for cloud-init")
 		}
 	}
-	
+
 	// Create cloud-init disk XML
 	cloudInitDiskXML := fmt.Sprintf(`    <disk type="file" device="cdrom">
       <driver name="qemu" type="raw"/>
@@ -919,19 +919,19 @@ func createAndAttachCloudInitISO(conn *libvirt.Connect, dom *libvirt.Domain, use
       <target dev="%s" bus="ide"/>
       <readonly/>
     </disk>`, isoPath, cloudInitDevice)
-	
+
 	// Add to domain XML
 	updatedXML, err := addDiskToXML(xmlDesc, cloudInitDiskXML)
 	if err != nil {
 		return fmt.Errorf("failed to update domain XML: %w", err)
 	}
-	
+
 	// Redefine domain
 	newDom, err := conn.DomainDefineXML(updatedXML)
 	if err != nil {
 		return fmt.Errorf("failed to redefine domain: %w", err)
 	}
 	newDom.Free()
-	
+
 	return nil
 }

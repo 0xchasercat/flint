@@ -5,8 +5,7 @@ import (
 	"github.com/volantvm/flint/cmd"
 )
 
-//go:embed web/out/*
-//go:embed web/public/*
+//go:embed all:web/out all:web/public
 var assets embed.FS
 
 func main() {

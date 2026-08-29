@@ -6,35 +6,23 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/volantvm/flint/pkg/config"
 )
 
 // getAPIKey retrieves the API key from config file
 func getAPIKey() (string, error) {
-	configPath := filepath.Join(os.Getenv("HOME"), ".flint", "config.json")
-
-	// Read config file
-	file, err := os.Open(configPath)
+	cfg, err := config.LoadConfig("")
 	if err != nil {
-		return "", fmt.Errorf("failed to read config file: %w", err)
+		return "", fmt.Errorf("failed to load config: %w", err)
 	}
-	defer file.Close()
-
-	var config map[string]interface{}
-	if err := json.NewDecoder(file).Decode(&config); err != nil {
-		return "", fmt.Errorf("failed to decode config: %w", err)
-	}
-
-	apiKey, exists := config["api_key"]
-	if !exists || apiKey == "" {
+	if cfg.APIKey == "" {
 		return "", fmt.Errorf("API key not found in config. Please run 'flint api-key' to get your API key")
 	}
-
-	return apiKey.(string), nil
+	return cfg.APIKey, nil
 }
 
 // createAuthenticatedRequest creates an HTTP request with API key authentication
@@ -107,7 +95,7 @@ var imageListCmd = &cobra.Command{
 			version := img["version"].(string)
 			arch := img["architecture"].(string)
 			size := img["size"].(string)
-			
+
 			status := "Available"
 			if downloaded, ok := img["downloaded"].(bool); ok && downloaded {
 				status = "Downloaded"
@@ -161,7 +149,7 @@ var imageDownloadCmd = &cobra.Command{
 			fmt.Println("Waiting for download to complete...")
 			for {
 				time.Sleep(2 * time.Second)
-				
+
 				statusReq, err := createAuthenticatedRequest("GET", baseURL+"/api/image-repository/"+imageID+"/status")
 				if err != nil {
 					log.Printf("Authentication failed for status check: %v", err)
@@ -229,10 +217,10 @@ var imageStatusCmd = &cobra.Command{
 			for _, img := range images {
 				id := img["id"].(string)
 				name := img["name"].(string)
-				
+
 				status := "Available"
 				progress := ""
-				
+
 				if downloaded, ok := img["downloaded"].(bool); ok && downloaded {
 					status = "Downloaded"
 					progress = "100%"

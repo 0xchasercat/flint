@@ -109,8 +109,6 @@ const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ||
     ? `${window.location.protocol}//${window.location.host}/api`
     : "http://localhost:5550/api")
 
-let apiKey: string | null = null
-
 class APIError extends Error {
   constructor(
     public status: number,
@@ -121,60 +119,13 @@ class APIError extends Error {
   }
 }
 
-// Get API key from environment or server (now requires authentication)
-async function getAPIKey(): Promise<string> {
-  if (apiKey) return apiKey
-
-  // First try environment variable
-  const envKey = process.env.NEXT_PUBLIC_FLINT_API_KEY || process.env.FLINT_API_KEY
-  if (envKey) {
-    apiKey = envKey
-    return apiKey
-  }
-
-  // For browser usage, we don't need the API key since we use session cookies
-  // Only CLI usage needs to fetch the API key
-  const isBrowser = typeof window !== 'undefined'
-  if (isBrowser) {
-    // Browser should use session authentication, not API key
-    throw new Error("API key not available in browser environment")
-  }
-
-  // Fallback to server endpoint for CLI usage (now requires authentication)
-  try {
-    const response = await fetch(`${API_BASE_URL}/api/api-key`, {
-      credentials: 'include' // Include session cookies
-    })
-    if (!response.ok) {
-      throw new Error(`Failed to get API key: ${response.status}`)
-    }
-    const data = await response.text()
-    apiKey = data.trim()
-    return apiKey
-  } catch (error) {
-    console.error("Failed to get API key:", error)
-    throw error
-  }
-}
-
 async function apiRequest<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
   const url = `${API_BASE_URL}${endpoint}`
 
-  // For web app (browser), use session cookies for authentication
-  // For CLI/API usage, use API key
-  const isBrowser = typeof window !== 'undefined'
-
-  let headers = {
+  const headers = {
     ...options.headers,
     'Content-Type': 'application/json',
   }
-
-  if (!isBrowser) {
-    // CLI/API usage - use API key
-    const apiKey = await getAPIKey()
-    headers['Authorization'] = `Bearer ${apiKey}`
-  }
-  // Browser usage - rely on session cookies from passphrase authentication
 
   const response = await fetch(url, {
     ...options,

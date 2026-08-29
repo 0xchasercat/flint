@@ -146,14 +146,11 @@ flint serve --set-passphrase
 
 ### API Key Access
 
-API keys are **never exposed publicly** and can only be accessed by authenticated users:
+API keys are **never returned by the HTTP API**. Read the key locally from the Flint account:
 
 ```bash
-# Via authenticated CLI
+# Run on the Flint host
 flint api-key
-
-# Via authenticated API
-curl -H "Authorization: Bearer YOUR_API_KEY" http://localhost:5550/api/api-key
 ```
 
 ---
@@ -433,16 +430,13 @@ Flint implements multi-layered authentication for different access patterns:
 
 #### API/CLI Authentication
 - **Bearer Token**: CLI and external tools use API keys
-- **Protected Endpoint**: `/api/api-key` requires authentication
-- **Secure Access**: API key only accessible after authentication
+- **Local Retrieval**: API keys are read with `flint api-key` on the host
+- **Browser Isolation**: the web UI never receives the master API key
 
 **Getting your API Key (Authenticated):**
 ```bash
-# Via CLI (requires authentication)
+# Run locally as the Flint service account
 flint api-key
-
-# Via API (requires authentication)
-curl -H "Authorization: Bearer YOUR_API_KEY" http://localhost:5550/api/api-key
 ```
 
 **Using API Keys:**
@@ -463,8 +457,8 @@ curl -H "Authorization: Bearer YOUR_API_KEY" http://localhost:5550/api/vms
 - API keys are never exposed publicly
 - Web UI users never see API keys
 - All endpoints require authentication except `/api/health`
-- Session cookies are HTTP-only and secure
-- Passphrase is hashed with SHA256
+- Session cookies are HTTP-only, SameSite=Strict, and Secure when served over HTTPS
+- Passphrases are hashed with bcrypt
 
 ### Endpoints
 
@@ -539,7 +533,7 @@ Flint uses WebSockets for real-time serial console access.
 - **Monitor API access logs** for suspicious activity
 
 ### Network Security
-- **Bind to specific interfaces** instead of 0.0.0.0 in production
+- **Keep the default localhost binding** unless remote listening is explicitly required
 - **Use firewalls** to restrict access to Flint's port
 - **Enable TLS/SSL** for production deployments
 - **Consider VPN access** for remote management
@@ -583,7 +577,7 @@ Flint stores configuration in `~/.flint/config.json`:
 ```json
 {
   "server": {
-    "host": "0.0.0.0",
+    "host": "127.0.0.1",
     "port": 5550,
     "read_timeout": 30,
     "write_timeout": 30

@@ -2,6 +2,8 @@ package server
 
 import (
 	"github.com/volantvm/flint/pkg/core"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -163,6 +165,11 @@ func TestValidateUUID(t *testing.T) {
 }
 
 func TestValidateFilePath(t *testing.T) {
+	allowedRoot := t.TempDir()
+	validPath := filepath.Join(allowedRoot, "ubuntu.iso")
+	if err := os.WriteFile(validPath, []byte("test"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	tests := []struct {
 		name    string
 		path    string
@@ -170,13 +177,13 @@ func TestValidateFilePath(t *testing.T) {
 	}{
 		{
 			name:    "valid absolute path",
-			path:    "/var/lib/images/ubuntu.iso",
+			path:    validPath,
 			wantErr: false,
 		},
 		{
-			name:    "valid relative path",
+			name:    "relative path rejected",
 			path:    "./images/ubuntu.iso",
-			wantErr: false,
+			wantErr: true,
 		},
 		{
 			name:    "empty path",
@@ -197,7 +204,7 @@ func TestValidateFilePath(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateFilePath(tt.path)
+			err := validateFilePathWithin(tt.path, []string{allowedRoot})
 			if (err != nil) != tt.wantErr {
 				t.Errorf("validateFilePath() error = %v, wantErr %v", err, tt.wantErr)
 			}

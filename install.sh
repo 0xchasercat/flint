@@ -55,7 +55,18 @@ main() {
     trap 'rm -rf "$tmp_dir"' EXIT
 
     yellow "⬇️ Downloading from $url"
-    curl -L --progress-bar "$url" -o "$tmp_dir/${BINARY_NAME}.zip"
+    curl --fail --location --proto '=https' --tlsv1.2 --progress-bar "$url" -o "$tmp_dir/${BINARY_NAME}.zip"
+    curl --fail --location --proto '=https' --tlsv1.2 --silent "${url}.sha256" -o "$tmp_dir/${BINARY_NAME}.zip.sha256"
+
+    yellow "🔐 Verifying release checksum..."
+    (
+        cd "$tmp_dir"
+        if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum --check "${BINARY_NAME}.zip.sha256"
+        else
+            shasum -a 256 --check "${BINARY_NAME}.zip.sha256"
+        fi
+    )
 
     yellow "📦 Extracting..."
     unzip -q "$tmp_dir/${BINARY_NAME}.zip" -d "$tmp_dir"
@@ -70,7 +81,7 @@ main() {
     config_dir="$HOME/.flint"
     if [[ ! -d "$config_dir" ]]; then
         mkdir -p "$config_dir"
-        chmod 755 "$config_dir"
+        chmod 700 "$config_dir"
         green "📁 Created config directory: $config_dir"
     fi
 

@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/volantvm/flint/pkg/core"
 	"github.com/google/uuid"
+	"github.com/volantvm/flint/pkg/core"
 )
 
 // Registry manages multiple server configurations
@@ -307,7 +307,7 @@ func (r *Registry) load() error {
 
 	var stored struct {
 		Servers       map[string]*core.ServerConfig `json:"servers"`
-		DefaultServer string                         `json:"default_server"`
+		DefaultServer string                        `json:"default_server"`
 	}
 
 	if err := json.Unmarshal(data, &stored); err != nil {
@@ -324,13 +324,13 @@ func (r *Registry) load() error {
 func (r *Registry) save() error {
 	// Ensure directory exists
 	dir := filepath.Dir(r.storagePath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
 	stored := struct {
 		Servers       map[string]*core.ServerConfig `json:"servers"`
-		DefaultServer string                         `json:"default_server"`
+		DefaultServer string                        `json:"default_server"`
 	}{
 		Servers:       r.servers,
 		DefaultServer: r.defaultServer,
