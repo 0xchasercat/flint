@@ -107,16 +107,24 @@ jobs:
       - name: Package Binary
         run: |
           if [[ "${{ matrix.libc }}" == "musl" ]]; then
-            zip -j flint-${{ matrix.os }}-${{ matrix.arch }}-musl.zip flint
+            archive="flint-${{ matrix.os }}-${{ matrix.arch }}-musl.zip"
           else
-            zip -j flint-${{ matrix.os }}-${{ matrix.arch }}.zip flint
+            archive="flint-${{ matrix.os }}-${{ matrix.arch }}.zip"
+          fi
+          zip -j "$archive" flint
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$archive" > "$archive.sha256"
+          else
+            shasum -a 256 "$archive" > "$archive.sha256"
           fi
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: flint-binary-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.libc && format('-{0}', matrix.libc) || '' }}
-          path: flint-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.libc && format('-{0}', matrix.libc) || '' }}.zip
+          path: |
+            flint-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.libc && format('-{0}', matrix.libc) || '' }}.zip
+            flint-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.libc && format('-{0}', matrix.libc) || '' }}.zip.sha256
 
   # --- JOB 2: Create the GitHub Release after all builds are done ---
   release:
@@ -139,4 +147,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           # The '**' glob recursively finds all .zip files to upload to the release.
-          files: "**/*.zip"
+          files: |
+            **/*.zip
+            **/*.zip.sha256

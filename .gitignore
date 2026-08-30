@@ -44,3 +44,6 @@ vendor/
 Thumbs.db
 
 flint
+
+# Repository contributor instructions must remain versioned even if globally ignored.
+!AGENTS.md

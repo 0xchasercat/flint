@@ -7,14 +7,17 @@ import (
 	"crypto/subtle"
 	"embed"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
+	"github.com/go-chi/chi/v5"
+	"github.com/volantvm/flint/pkg/config"
+	"github.com/volantvm/flint/pkg/connectionpool"
 	"github.com/volantvm/flint/pkg/imagerepository"
 	"github.com/volantvm/flint/pkg/libvirtclient"
 	"github.com/volantvm/flint/pkg/logger"
-	"github.com/go-chi/chi/v5"
+	"github.com/volantvm/flint/pkg/serverregistry"
 	"golang.org/x/crypto/bcrypt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -26,16 +29,28 @@ import (
 )
 
 type Server struct {
-	router           *chi.Mux
-	client           libvirtclient.ClientInterface
-	assets           embed.FS
-	apiKey           string
-	passphraseHash   string
-	rateLimiters     map[string]*rateLimiter
-	rateLimiterMutex sync.RWMutex
-	imageRepo        *imagerepository.ImageRepository
-	sessions         map[string]time.Time // sessionID -> expiry time
-	sessionsMu       sync.RWMutex
+	router                *chi.Mux
+	client                libvirtclient.ClientInterface
+	assets                embed.FS
+	apiKey                string
+	passphraseHash        string
+	rateLimiters          map[string]*rateLimiter
+	rateLimiterMutex      sync.RWMutex
+	imageRepo             *imagerepository.ImageRepository
+	sessions              map[string]time.Time // sessionID -> expiry time
+	sessionsMu            sync.RWMutex
+	consoleTokens         map[string]consoleToken
+	consoleTokensMu       sync.Mutex
+	serverRegistry        *serverregistry.Registry
+	connectionPool        *connectionpool.Pool
+	contentSecurityPolicy string
+	trustedOrigins        map[string]struct{}
+}
+
+type consoleToken struct {
+	VMUUID string
+	Kind   string
+	Expiry time.Time
 }
 
 type rateLimiter struct {
@@ -49,13 +64,22 @@ func NewServer(client libvirtclient.ClientInterface, assets embed.FS) *Server {
 	imageRepo := imagerepository.NewImageRepository(imageRepoPath)
 
 	s := &Server{
-		router:       chi.NewRouter(),
-		client:       client,
-		assets:       assets,
-		rateLimiters: make(map[string]*rateLimiter),
-		imageRepo:    imageRepo,
-		sessions:     make(map[string]time.Time),
+		router:                chi.NewRouter(),
+		client:                client,
+		assets:                assets,
+		rateLimiters:          make(map[string]*rateLimiter),
+		imageRepo:             imageRepo,
+		sessions:              make(map[string]time.Time),
+		consoleTokens:         make(map[string]consoleToken),
+		connectionPool:        connectionpool.NewPool(30*time.Minute, 5*time.Minute),
+		contentSecurityPolicy: buildContentSecurityPolicy(assets),
+		trustedOrigins:        parseTrustedOrigins(os.Getenv("FLINT_TRUSTED_ORIGINS")),
 	}
+	registry, err := serverregistry.NewRegistry("")
+	if err != nil {
+		logger.Fatal("Failed to initialize server registry", map[string]interface{}{"error": err.Error()})
+	}
+	s.serverRegistry = registry
 
 	// Load or generate config
 	s.loadOrGenerateConfig()
@@ -67,7 +91,8 @@ func NewServer(client libvirtclient.ClientInterface, assets embed.FS) *Server {
 	// Start session cleanup goroutine
 	go s.cleanupExpiredSessions()
 
-	// s.router.Use(middleware.Logger) // Add logging middleware
+	s.router.Use(s.securityHeadersMiddleware)
+	s.router.Use(s.rateLimitMiddleware)
 	s.setupRoutes()
 	return s
 }
@@ -76,58 +101,21 @@ func NewServer(client libvirtclient.ClientInterface, assets embed.FS) *Server {
 func (s *Server) loadOrGenerateConfig() {
 	configDir := filepath.Join(os.Getenv("HOME"), ".flint")
 	configPath := filepath.Join(configDir, "config.json")
-
-	// Try to load existing config
-	if data, err := os.ReadFile(configPath); err == nil {
-		var config map[string]interface{}
-		if err := json.Unmarshal(data, &config); err == nil {
-			if apiKey, exists := config["api_key"]; exists && apiKey != "" {
-				s.apiKey = apiKey.(string)
-			}
-			// Load passphrase hash if it exists
-			if security, exists := config["security"].(map[string]interface{}); exists {
-				if passphraseHash, exists := security["passphrase_hash"].(string); exists && passphraseHash != "" {
-					s.passphraseHash = passphraseHash
-				}
-			}
-			logger.Info("Loaded config from file")
-			return
-		}
-	}
-
-	// Generate new config with defaults
-	s.apiKey = s.generateAPIKey()
-	config := s.createDefaultConfig()
-
-	// Save to config file
-	if err := os.MkdirAll(configDir, 0755); err != nil {
-		logger.Error("Failed to create config directory", map[string]interface{}{
-			"error": err.Error(),
-			"path":  configDir,
-		})
-		return
-	}
-
-	data, err := json.MarshalIndent(config, "", "  ")
+	cfg, err := config.LoadConfig(configPath)
 	if err != nil {
-		logger.Error("Failed to marshal config", map[string]interface{}{
-			"error": err.Error(),
-		})
-		return
+		panic(fmt.Sprintf("failed to load security configuration: %v", err))
 	}
-
-	if err := os.WriteFile(configPath, data, 0600); err != nil {
-		logger.Error("Failed to save config file", map[string]interface{}{
-			"error": err.Error(),
-			"path":  configPath,
-		})
-		return
+	s.passphraseHash = cfg.Security.PassphraseHash
+	if s.validateAPIKeyFormat(cfg.APIKey) {
+		s.apiKey = cfg.APIKey
+	} else {
+		s.apiKey = s.generateAPIKey()
+		cfg.APIKey = s.apiKey
 	}
-
-	logger.Info("Generated and saved new config file", map[string]interface{}{
-		"config_path":  configPath,
-		"bind_address": config["server"].(map[string]interface{})["host"],
-	})
+	if err := cfg.SaveConfig(configPath); err != nil {
+		panic(fmt.Sprintf("failed to save security configuration: %v", err))
+	}
+	logger.Info("Loaded security configuration", map[string]interface{}{"config_path": configPath})
 }
 
 // generateAPIKey generates a secure API key
@@ -144,77 +132,21 @@ func (s *Server) generateAPIKey() string {
 }
 
 // createDefaultConfig creates a default configuration
-func (s *Server) createDefaultConfig() map[string]interface{} {
-	return map[string]interface{}{
-		"api_key": s.apiKey,
-		"server": map[string]interface{}{
-			"host":          "0.0.0.0", // Bind to all interfaces for remote server access
-			"port":          5550,
-			"read_timeout":  30,
-			"write_timeout": 30,
-		},
-		"security": map[string]interface{}{
-			"rate_limit_requests": 100,
-			"rate_limit_burst":    20,
-			"passphrase_hash":     s.passphraseHash,
-		},
-		"libvirt": map[string]interface{}{
-			"uri":             "qemu:///system",
-			"iso_pool":        "isos",
-			"template_pool":   "templates",
-			"image_pool_path": "/var/lib/flint/images",
-		},
-		"logging": map[string]interface{}{
-			"level":  "INFO",
-			"format": "json",
-		},
+func (s *Server) validateAPIKeyFormat(key string) bool {
+	if len(key) != 64 {
+		return false
 	}
-}
-
-// detectPublicIP tries to detect the public IPv4 address
-func (s *Server) detectPublicIP() string {
-	// Try multiple services to detect public IP
-	services := []string{
-		"https://api.ipify.org",
-		"https://ipv4.icanhazip.com",
-		"https://checkip.amazonaws.com",
-	}
-
-	for _, service := range services {
-		if ip := s.fetchIPFromService(service); ip != "" {
-			return ip
-		}
-	}
-
-	// Fallback: try to get local IP
-	return s.getLocalIP()
-}
-
-// fetchIPFromService fetches IP from a public IP service
-func (s *Server) fetchIPFromService(url string) string {
-	resp, err := http.Get(url)
-	if err != nil {
-		return ""
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return ""
-	}
-
-	return strings.TrimSpace(string(body))
-}
-
-// getLocalIP gets the local IP address
-func (s *Server) getLocalIP() string {
-	// Simple implementation - in real code we'd enumerate network interfaces
-	return "127.0.0.1" // Secure fallback
+	_, err := hex.DecodeString(key)
+	return err == nil
 }
 
 // webAuthMiddleware validates web UI passphrase
 func (s *Server) webAuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isPublicWebAsset(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		// Skip auth for API endpoints (they use API key)
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			next.ServeHTTP(w, r)
@@ -251,7 +183,9 @@ func (s *Server) webAuthMiddleware(next http.Handler) http.Handler {
 					Value:    sessionID,
 					Path:     "/",
 					HttpOnly: true,
-					MaxAge:   24 * 60 * 60, // 24 hours
+					Secure:   requestIsHTTPS(r),
+					SameSite: http.SameSiteStrictMode,
+					MaxAge:   60 * 60, // 1 hour
 				})
 				http.Redirect(w, r, "/", http.StatusSeeOther)
 				return
@@ -289,7 +223,7 @@ func (s *Server) showLoginForm(w http.ResponseWriter, invalid bool) {
 </head>
 <body>
     <div class="login">
-        <h2>🔐 Flint Web UI</h2>
+        <h2>Flint Web UI</h2>
         %s
         <form method="POST" action="/login">
             <input type="password" name="passphrase" placeholder="Enter passphrase" required>
@@ -347,6 +281,10 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		// Fallback to session cookie authentication (for web app)
 		cookie, err := r.Cookie("flint_session")
 		if err == nil && s.isValidSession(cookie.Value) {
+			if requestNeedsOriginValidation(r.Method) && !sameOriginRequest(r, s.trustedOrigins) {
+				http.Error(w, `{"error": "Cross-origin request rejected"}`, http.StatusForbidden)
+				return
+			}
 			// Valid session from passphrase authentication
 			next.ServeHTTP(w, r)
 			return
@@ -360,8 +298,9 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 // rateLimitMiddleware implements rate limiting per client
 func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Skip rate limiting for health check
-		if r.URL.Path == "/api/health" {
+		// Static frontend assets are immutable and may generate many parallel requests.
+		// Limit authentication and API traffic, not normal page rendering.
+		if r.URL.Path == "/api/health" || (r.URL.Path != "/login" && !strings.HasPrefix(r.URL.Path, "/api/")) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -369,8 +308,16 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 		// Use client IP as the rate limiting key
 		clientIP := s.getClientIP(r)
 
-		// Check rate limit
-		if !s.allowRequest(clientIP) {
+		capacity := 100
+		perMinute := 100
+		limiterKey := "api:" + clientIP
+		if r.URL.Path == "/login" {
+			capacity = 5
+			perMinute = 5
+			limiterKey = "login:" + clientIP
+		}
+
+		if !s.allowRequest(limiterKey, capacity, perMinute) {
 			w.Header().Set("Retry-After", "60")
 			http.Error(w, `{"error": "Rate limit exceeded. Try again in 60 seconds."}`, http.StatusTooManyRequests)
 			return
@@ -382,44 +329,25 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 
 // getClientIP extracts the real client IP from the request
 func (s *Server) getClientIP(r *http.Request) string {
-	// Check X-Forwarded-For header first (for reverse proxies)
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		// X-Forwarded-For format: client, proxy1, proxy2
-		// Take the leftmost (original client) IP
-		ips := strings.Split(xff, ",")
-		if len(ips) > 0 {
-			clientIP := strings.TrimSpace(ips[0])
-			// Validate it's a proper IP
-			if clientIP != "" && !strings.Contains(clientIP, " ") {
-				return clientIP
-			}
-		}
-	}
-
-	// Check X-Real-IP header
-	if xri := r.Header.Get("X-Real-IP"); xri != "" {
-		return strings.TrimSpace(xri)
-	}
-
-	// Fall back to RemoteAddr
-	if idx := strings.LastIndex(r.RemoteAddr, ":"); idx > 0 {
-		return r.RemoteAddr[:idx]
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil {
+		return host
 	}
 	return r.RemoteAddr
 }
 
 // allowRequest checks if a request should be allowed based on rate limiting
-func (s *Server) allowRequest(clientIP string) bool {
+func (s *Server) allowRequest(key string, capacity, perMinute int) bool {
 	s.rateLimiterMutex.Lock()
 	defer s.rateLimiterMutex.Unlock()
 
 	now := time.Now()
-	limiter, exists := s.rateLimiters[clientIP]
+	limiter, exists := s.rateLimiters[key]
 
 	if !exists {
 		// New client - create limiter with 100 requests per minute
-		s.rateLimiters[clientIP] = &rateLimiter{
-			tokens:     99, // Allow immediate request
+		s.rateLimiters[key] = &rateLimiter{
+			tokens:     capacity - 1,
 			lastRefill: now,
 		}
 		return true
@@ -427,10 +355,10 @@ func (s *Server) allowRequest(clientIP string) bool {
 
 	// Refill tokens based on time passed
 	timePassed := now.Sub(limiter.lastRefill)
-	tokensToAdd := int(timePassed.Seconds() * 100 / 60) // 100 requests per minute
+	tokensToAdd := int(timePassed.Seconds() * float64(perMinute) / 60)
 
 	if tokensToAdd > 0 {
-		limiter.tokens = min(limiter.tokens+tokensToAdd, 100)
+		limiter.tokens = min(limiter.tokens+tokensToAdd, capacity)
 		limiter.lastRefill = now
 	}
 
@@ -452,11 +380,10 @@ func min(a, b int) int {
 
 // Serve embedded static files via chi, without overriding API routes
 func (s *Server) setupRoutes() {
-	// Public API endpoints (no authentication required)
+	// Public API endpoint contains no host or VM details.
 	s.router.Get("/api/health", s.handleHealthCheck())
 
-	// Serial console endpoints (token-based auth, not middleware auth)
-	s.router.Get("/api/vms/{uuid}/serial-console", s.handleGetVMSerialConsole())
+	// Console WebSockets consume short-lived, one-time tokens.
 	s.router.Get("/api/vms/{uuid}/serial-console/ws", s.handleVMSerialConsoleWS())
 
 	// VNC console WebSocket endpoint (token-based auth, not middleware auth)
@@ -464,8 +391,8 @@ func (s *Server) setupRoutes() {
 
 	// Protected API routes with authentication
 	s.router.Route("/api", func(r chi.Router) {
+		r.Use(s.requestSizeLimitMiddleware(2 << 20))
 		r.Use(s.authMiddleware)
-		r.Get("/api-key", s.handleGetAPIKey()) // Now requires authentication!
 		r.Get("/ssh-key/detect", s.handleDetectSSHKey())
 
 		// Connection management endpoints
@@ -482,6 +409,7 @@ func (s *Server) setupRoutes() {
 		r.Get("/vms/{uuid}/guest-agent/status", s.handleGetGuestAgentStatus())
 		r.Post("/vms/{uuid}/guest-agent/install", s.handleInstallGuestAgent())
 		r.Get("/vms/{uuid}/vnc", s.handleGetVMVNCInfo())
+		r.Get("/vms/{uuid}/serial-console", s.handleGetVMSerialConsole())
 		r.Get("/vms/{uuid}/console-stream", s.handleGetVMConsoleStream())
 		r.Get("/vms/{uuid}/snapshots", s.handleGetVMSnapshots())
 		r.Post("/vms/{uuid}/snapshots", s.handleCreateVMSnapshot())
@@ -531,52 +459,26 @@ func (s *Server) setupRoutes() {
 	webRouter.Use(s.webAuthMiddleware)
 
 	// Serve static files from embedded assets with middleware
-	webRouter.Get("/*", func(w http.ResponseWriter, r *http.Request) {
-		// Handle embedded assets from web/out/ and web/public/
-		path := strings.TrimPrefix(r.URL.Path, "/")
-		if path == "" {
-			path = "index.html"
+	serveWebAsset := func(w http.ResponseWriter, r *http.Request) {
+		// Handle embedded assets from web/out/ and web/public/.
+		requestPath := strings.TrimPrefix(r.URL.Path, "/")
+		if requestPath == "" {
+			requestPath = "index.html"
 		}
 
-		// First try web/out/ for built files
-		embeddedPath := "web/out/" + path
-		file, err := s.assets.Open(embeddedPath)
+		file, servedPath, err := openWebAsset(s.assets, requestPath)
 		if err != nil {
-			// If not found in web/out/, try web/public/ for static assets
-			publicPath := "web/public/" + path
-			file, err = s.assets.Open(publicPath)
-			if err != nil {
-				// If file not found, try index.html for SPA routing
-				if path != "index.html" {
-					indexFile, indexErr := s.assets.Open("web/out/index.html")
-					if indexErr == nil {
-						defer indexFile.Close()
-						w.Header().Set("Content-Type", "text/html")
-						io.Copy(w, indexFile)
-						return
-					}
-				}
-				http.NotFound(w, r)
-				return
-			}
+			http.NotFound(w, r)
+			return
 		}
 		defer file.Close()
-
-		// Set content type based on file extension
-		if strings.HasSuffix(path, ".css") {
-			w.Header().Set("Content-Type", "text/css")
-		} else if strings.HasSuffix(path, ".js") {
-			w.Header().Set("Content-Type", "application/javascript")
-		} else if strings.HasSuffix(path, ".svg") {
-			w.Header().Set("Content-Type", "image/svg+xml")
-		} else if strings.HasSuffix(path, ".png") {
-			w.Header().Set("Content-Type", "image/png")
-		} else if strings.HasSuffix(path, ".ico") {
-			w.Header().Set("Content-Type", "image/x-icon")
+		w.Header().Set("Content-Type", webContentType(servedPath))
+		if r.Method != http.MethodHead {
+			io.Copy(w, file)
 		}
-
-		io.Copy(w, file)
-	})
+	}
+	webRouter.Get("/*", serveWebAsset)
+	webRouter.Head("/*", serveWebAsset)
 
 	// Mount the web router to handle all non-API routes
 	s.router.Mount("/", webRouter)
@@ -585,7 +487,7 @@ func (s *Server) setupRoutes() {
 // Start starts the HTTP server with graceful shutdown
 func (s *Server) Start(addr string) error {
 	if addr == "" {
-		addr = "0.0.0.0:5550"
+		addr = "127.0.0.1:5550"
 	}
 
 	logger.Info("Starting Flint server", map[string]interface{}{
@@ -594,8 +496,12 @@ func (s *Server) Start(addr string) error {
 
 	// Create a server instance for graceful shutdown
 	srv := &http.Server{
-		Addr:    addr,
-		Handler: s.router,
+		Addr:              addr,
+		Handler:           s.router,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 
 	// Channel to listen for interrupt or terminate signals
@@ -630,6 +536,7 @@ func (s *Server) Start(addr string) error {
 		})
 		return err
 	}
+	s.connectionPool.CloseAll()
 
 	logger.Info("Server shutdown complete")
 	return nil
@@ -662,13 +569,6 @@ func (s *Server) validateAuthToken(token string) bool {
 	}
 
 	return true
-}
-
-// generateAuthToken generates a secure authentication token
-func (s *Server) generateAuthToken() string {
-	bytes := make([]byte, 32)
-	rand.Read(bytes)
-	return hex.EncodeToString(bytes)
 }
 
 // GetAPIKey returns the server's API key (for CLI usage)
@@ -720,8 +620,8 @@ func (s *Server) createSession() (string, error) {
 		s.sessions = make(map[string]time.Time)
 	}
 
-	// Session expires in 24 hours
-	expiry := time.Now().Add(24 * time.Hour)
+	// Session expires in 1 hour
+	expiry := time.Now().Add(time.Hour)
 	s.sessions[sessionID] = expiry
 
 	return sessionID, nil

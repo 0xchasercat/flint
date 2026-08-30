@@ -80,7 +80,7 @@ if systemctl is-active --quiet flint; then
     log_info "Flint service started successfully!"
     log_info "Service status: $(systemctl is-active flint)"
     log_info "Flint is now running at: http://localhost:5550"
-    log_info "API Key: $(su - flint -c 'flint api-key' 2>/dev/null | grep 'Flint API Key' | cut -d: -f2 | xargs)"
+    log_info "Retrieve the API key locally with: sudo -u flint HOME=/var/lib/flint flint api-key"
 else
     log_error "Failed to start Flint service"
     log_info "Check service status: systemctl status flint"

@@ -13,16 +13,16 @@ import (
 
 // CloudImage represents a downloadable cloud image
 type CloudImage struct {
-	ID          string  `json:"id"`
-	Name        string  `json:"name"`
-	URL         string  `json:"url"`
-	ChecksumURL string  `json:"checksum_url,omitempty"`
-	SizeGB      float64 `json:"size_gb"`
-	Type        string  `json:"type"`
-	OS          string  `json:"os"`
-	Version     string  `json:"version"`
-	Description string  `json:"description"`
-	Architecture string `json:"architecture"`
+	ID           string  `json:"id"`
+	Name         string  `json:"name"`
+	URL          string  `json:"url"`
+	ChecksumURL  string  `json:"checksum_url,omitempty"`
+	SizeGB       float64 `json:"size_gb"`
+	Type         string  `json:"type"`
+	OS           string  `json:"os"`
+	Version      string  `json:"version"`
+	Description  string  `json:"description"`
+	Architecture string  `json:"architecture"`
 }
 
 // ImageRepository manages cloud image downloads
@@ -42,6 +42,18 @@ func NewImageRepository(storagePath string) *ImageRepository {
 // getDefaultImages returns curated list of popular cloud images
 func getDefaultImages() []CloudImage {
 	return []CloudImage{
+		{
+			ID:           "ubuntu-26.04-lts",
+			Name:         "Ubuntu 26.04 LTS (Resolute Raccoon)",
+			URL:          "https://cloud-images.ubuntu.com/releases/resolute/release/ubuntu-26.04-server-cloudimg-amd64.img",
+			ChecksumURL:  "https://cloud-images.ubuntu.com/releases/resolute/release/SHA256SUMS",
+			SizeGB:       0.9,
+			Type:         "template",
+			OS:           "Ubuntu",
+			Version:      "26.04 LTS",
+			Description:  "Ubuntu 26.04 LTS (Resolute Raccoon) cloud image with cloud-init support",
+			Architecture: "amd64",
+		},
 		{
 			ID:           "ubuntu-24.04-lts",
 			Name:         "Ubuntu 24.04 LTS (Noble)",
@@ -267,10 +279,10 @@ func (r *ImageRepository) DownloadImage(imageID string, progressCallback func(do
 	// Download with progress tracking
 	var downloaded int64
 	total := resp.ContentLength
-	
+
 	buffer := make([]byte, 32*1024) // 32KB buffer
 	hash := sha256.New()
-	
+
 	for {
 		n, err := resp.Body.Read(buffer)
 		if n > 0 {
@@ -278,17 +290,17 @@ func (r *ImageRepository) DownloadImage(imageID string, progressCallback func(do
 			if _, writeErr := out.Write(buffer[:n]); writeErr != nil {
 				return fmt.Errorf("failed to write to file: %w", writeErr)
 			}
-			
+
 			// Update hash
 			hash.Write(buffer[:n])
-			
+
 			// Update progress
 			downloaded += int64(n)
 			if progressCallback != nil {
 				progressCallback(downloaded, total)
 			}
 		}
-		
+
 		if err == io.EOF {
 			break
 		}
@@ -325,7 +337,7 @@ func (r *ImageRepository) verifyChecksum(filePath, checksumURL, filename string)
 	// Parse checksum file (format: "hash filename")
 	lines := strings.Split(string(checksumData), "\n")
 	var expectedHash string
-	
+
 	for _, line := range lines {
 		if strings.Contains(line, filename) || strings.Contains(line, "cloudimg-amd64.img") {
 			parts := strings.Fields(line)

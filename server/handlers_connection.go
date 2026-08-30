@@ -14,24 +14,24 @@ import (
 
 // ConnectionConfigRequest represents a request to update connection configuration
 type ConnectionConfigRequest struct {
-	URI         string                 `json:"uri"`
-	SSHEnabled  bool                   `json:"ssh_enabled"`
-	SSHUsername string                 `json:"ssh_username"`
-	SSHHost     string                 `json:"ssh_host"`
-	SSHPort     int                    `json:"ssh_port"`
-	SSHKeyPath  string                 `json:"ssh_key_path"`
+	URI         string `json:"uri"`
+	SSHEnabled  bool   `json:"ssh_enabled"`
+	SSHUsername string `json:"ssh_username"`
+	SSHHost     string `json:"ssh_host"`
+	SSHPort     int    `json:"ssh_port"`
+	SSHKeyPath  string `json:"ssh_key_path"`
 }
 
 // ConnectionStatusResponse represents the current connection status
 type ConnectionStatusResponse struct {
-	Connected      bool   `json:"connected"`
-	URI            string `json:"uri"`
-	EffectiveURI   string `json:"effective_uri"`
-	SSHEnabled     bool   `json:"ssh_enabled"`
-	SSHHost        string `json:"ssh_host,omitempty"`
-	SSHUsername    string `json:"ssh_username,omitempty"`
-	SSHPort        int    `json:"ssh_port,omitempty"`
-	ErrorMessage   string `json:"error_message,omitempty"`
+	Connected    bool   `json:"connected"`
+	URI          string `json:"uri"`
+	EffectiveURI string `json:"effective_uri"`
+	SSHEnabled   bool   `json:"ssh_enabled"`
+	SSHHost      string `json:"ssh_host,omitempty"`
+	SSHUsername  string `json:"ssh_username,omitempty"`
+	SSHPort      int    `json:"ssh_port,omitempty"`
+	ErrorMessage string `json:"error_message,omitempty"`
 }
 
 // ConnectionTestRequest represents a request to test connection parameters
@@ -228,7 +228,7 @@ func (s *Server) handleUpdateConnectionConfig() http.HandlerFunc {
 		configDir := filepath.Join(os.Getenv("HOME"), ".flint")
 		configPath := filepath.Join(configDir, "config.json")
 
-		if err := os.MkdirAll(configDir, 0755); err != nil {
+		if err := os.MkdirAll(configDir, 0700); err != nil {
 			http.Error(w, "Failed to create config directory", http.StatusInternalServerError)
 			return
 		}
@@ -246,10 +246,9 @@ func (s *Server) handleUpdateConnectionConfig() http.HandlerFunc {
 		// Return success response
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"message": "Configuration updated. Please restart the server for changes to take effect.",
+			"success":       true,
+			"message":       "Configuration updated. Please restart the server for changes to take effect.",
 			"effective_uri": cfg.GetEffectiveLibvirtURI(),
 		})
 	}
 }
-

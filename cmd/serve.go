@@ -1,23 +1,21 @@
 package cmd
 
 import (
-	"crypto/rand"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
+	libvirt "github.com/libvirt/libvirt-go"
+	"github.com/spf13/cobra"
 	"github.com/volantvm/flint/pkg/config"
 	"github.com/volantvm/flint/pkg/core"
 	"github.com/volantvm/flint/pkg/libvirtclient"
 	"github.com/volantvm/flint/pkg/logger"
 	"github.com/volantvm/flint/server"
-	libvirt "github.com/libvirt/libvirt-go"
-	"github.com/spf13/cobra"
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/term"
 )
@@ -316,6 +314,22 @@ func handlePassphraseSetup(cfg *config.Config) error {
 		return nil
 	}
 
+	passphrase, configured, err := passphraseFromEnvironment()
+	if err != nil {
+		return err
+	}
+	if configured {
+		if cfg.Security.PassphraseHash != "" && bcrypt.CompareHashAndPassword([]byte(cfg.Security.PassphraseHash), []byte(passphrase)) == nil {
+			return nil
+		}
+		cfg.Security.PassphraseHash = hashPassphrase(passphrase)
+		if err := saveConfig(cfg); err != nil {
+			return fmt.Errorf("failed to save config: %w", err)
+		}
+		logger.Info("Passphrase updated from environment")
+		return nil
+	}
+
 	// If no passphrase set, prompt for initial setup
 	if cfg.Security.PassphraseHash == "" {
 		fmt.Println("🔐 No web UI passphrase set. Let's set one up for security.")
@@ -344,7 +358,28 @@ func handlePassphraseSetup(cfg *config.Config) error {
 	return nil
 }
 
-// hashPassphrase creates a SHA256 hash of the passphrase
+func passphraseFromEnvironment() (string, bool, error) {
+	passphrase := os.Getenv("FLINT_PASSPHRASE")
+	if path := os.Getenv("FLINT_PASSPHRASE_FILE"); path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return "", false, fmt.Errorf("failed to read FLINT_PASSPHRASE_FILE: %w", err)
+		}
+		if len(data) > 4096 {
+			return "", false, fmt.Errorf("FLINT_PASSPHRASE_FILE is too large")
+		}
+		passphrase = strings.TrimSuffix(strings.TrimSuffix(string(data), "\n"), "\r")
+	}
+	if passphrase == "" {
+		return "", false, nil
+	}
+	if len(passphrase) < 8 || len(passphrase) > 72 || strings.ContainsAny(passphrase, "\r\n\x00") {
+		return "", false, fmt.Errorf("passphrase must contain 8-72 bytes without line breaks")
+	}
+	return passphrase, true, nil
+}
+
+// hashPassphrase creates a bcrypt hash of the passphrase.
 func hashPassphrase(passphrase string) string {
 	// Use bcrypt with cost 12
 	hash, err := bcrypt.GenerateFromPassword([]byte(passphrase), 12)
@@ -360,7 +395,7 @@ func saveConfig(cfg *config.Config) error {
 	configPath := filepath.Join(configDir, "config.json")
 
 	// Create config directory if it doesn't exist
-	if err := os.MkdirAll(configDir, 0755); err != nil {
+	if err := os.MkdirAll(configDir, 0700); err != nil {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
@@ -388,7 +423,9 @@ The web UI requires a passphrase for access. You can set it in several ways:
 3. Set FLINT_PASSPHRASE environment variable
 4. Configure in ~/.flint/config.json
 
-The API requires an API key for authentication, which can be obtained from the web UI after login.
+Set FLINT_BIND_ADDRESS and FLINT_BIND_PORT to override the HTTP listen address.
+
+The API requires an API key for authentication. Retrieve it locally with "flint api-key".
 
 Examples:
   flint serve                           # Start with existing config
@@ -430,7 +467,8 @@ Examples:
 		}
 
 		logger.Info("Starting Flint server", map[string]interface{}{
-			"config": cfg,
+			"address":     cfg.GetServerAddress(),
+			"libvirt_uri": cfg.GetEffectiveLibvirtURI(),
 		})
 
 		// 1. Create a dummy client first to allow server initialization
@@ -489,32 +527,13 @@ WARNING: Keep this key secure and do not share it publicly.`,
 		configDir := filepath.Join(os.Getenv("HOME"), ".flint")
 		configPath := filepath.Join(configDir, "config.json")
 
-		var apiKey string
-
-		// Try to read existing config
-		if data, err := os.ReadFile(configPath); err == nil {
-			var config map[string]interface{}
-			if err := json.Unmarshal(data, &config); err == nil {
-				if key, exists := config["api_key"]; exists && key != "" {
-					apiKey = key.(string)
-				}
-			}
+		cfg, err := config.LoadConfig(configPath)
+		if err != nil || cfg.APIKey == "" {
+			fmt.Println("No persisted API key found. Start Flint once to generate it securely.")
+			return
 		}
 
-		// If no key found in config, generate a new one (but warn user)
-		if apiKey == "" {
-			bytes := make([]byte, 32)
-			rand.Read(bytes)
-			apiKey = hex.EncodeToString(bytes)
-			fmt.Println("📝 Note: No existing API key found. Generated a new one.")
-			fmt.Println("   Start the server first with 'flint serve' to generate and save a key.")
-			fmt.Println("")
-		}
-
-		fmt.Printf("🔑 Flint API Key: %s\n\n", apiKey)
-		fmt.Println("Use this key in the Authorization header:")
-		fmt.Printf("  Authorization: Bearer %s\n\n", apiKey)
-		fmt.Println("⚠️  WARNING: Keep this key secure!")
+		fmt.Println(cfg.APIKey)
 	},
 }
 

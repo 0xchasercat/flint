@@ -6,15 +6,10 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Loader2, Monitor, AlertCircle, Maximize2, Minimize2 } from "lucide-react"
 
+let RFBClass: any = null
+
 interface VMVNCConsoleProps {
   vmUuid: string
-}
-
-// Declare global RFB from noVNC
-declare global {
-  interface Window {
-    RFB: any
-  }
 }
 
 export function VMVNCConsole({ vmUuid }: VMVNCConsoleProps) {
@@ -26,59 +21,19 @@ export function VMVNCConsole({ vmUuid }: VMVNCConsoleProps) {
   const [isConnected, setIsConnected] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [isFullscreen, setIsFullscreen] = useState(false)
-  const [isScriptLoaded, setIsScriptLoaded] = useState(false)
-
-  // Load noVNC from CDN
+  const [reconnectAttempt, setReconnectAttempt] = useState(0)
   useEffect(() => {
-    if (typeof window === 'undefined' || window.RFB) {
-      setIsScriptLoaded(true)
-      return
-    }
-
-    const script = document.createElement('script')
-    script.src = 'https://cdn.jsdelivr.net/npm/@novnc/novnc@latest/lib/rfb.js'
-    script.async = true
-    script.onload = () => setIsScriptLoaded(true)
-    script.onerror = () => {
-      setError('Failed to load noVNC library')
-      setIsConnecting(false)
-    }
-    document.body.appendChild(script)
-
-    return () => {
-      document.body.removeChild(script)
-    }
-  }, [])
-
-  useEffect(() => {
-    if (!isScriptLoaded || !vncContainerRef.current || !vmUuid) return
+    if (!vncContainerRef.current || !vmUuid) return
 
     const initializeVNC = async () => {
       try {
         setIsConnecting(true)
         setError(null)
 
-        // Wait for RFB to be available
-        let attempts = 0
-        while (!window.RFB && attempts < 50) {
-          await new Promise(resolve => setTimeout(resolve, 100))
-          attempts++
+        if (!RFBClass) {
+          const module = await import("@novnc/novnc")
+          RFBClass = module.default
         }
-
-        if (!window.RFB) {
-          throw new Error('noVNC RFB not available')
-        }
-
-        // Get API key for authentication
-        const apiKeyResponse = await fetch('/api/api-key', {
-          credentials: 'include'
-        })
-
-        if (!apiKeyResponse.ok) {
-          throw new Error('Failed to get API key')
-        }
-
-        const apiKey = await apiKeyResponse.text()
 
         // Get VNC connection details
         const vncInfoResponse = await fetch(`/api/vms/${vmUuid}/vnc`, {
@@ -90,17 +45,20 @@ export function VMVNCConsole({ vmUuid }: VMVNCConsoleProps) {
           throw new Error(`Failed to get VNC info: ${errorText}`)
         }
 
-        const vncInfo = await vncInfoResponse.json()
+        const { websocket_path, token } = await vncInfoResponse.json()
+        if (!websocket_path || !token) {
+          throw new Error('Invalid VNC connection response')
+        }
 
         // Construct WebSocket URL
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-        const wsUrl = `${protocol}//${window.location.host}/api/vms/${vmUuid}/vnc/ws?token=${encodeURIComponent(apiKey)}`
+        const wsUrl = `${protocol}//${window.location.host}${websocket_path}?token=${encodeURIComponent(token)}`
 
         // Clear container
         vncContainerRef.current!.innerHTML = ''
 
         // Initialize noVNC RFB client
-        const rfb = new window.RFB(vncContainerRef.current, wsUrl, {
+        const rfb = new RFBClass(vncContainerRef.current, wsUrl, {
           credentials: { password: '' },
           shared: true,
         })
@@ -166,7 +124,7 @@ export function VMVNCConsole({ vmUuid }: VMVNCConsoleProps) {
         rfbRef.current = null
       }
     }
-  }, [vmUuid, isScriptLoaded])
+  }, [vmUuid, reconnectAttempt])
 
   const toggleFullscreen = () => {
     if (!vncContainerRef.current) return
@@ -194,9 +152,7 @@ export function VMVNCConsole({ vmUuid }: VMVNCConsoleProps) {
     setIsConnecting(true)
     setIsConnected(false)
 
-    // Trigger re-initialization
-    setIsScriptLoaded(false)
-    setTimeout(() => setIsScriptLoaded(true), 100)
+    setReconnectAttempt((attempt) => attempt + 1)
   }
 
   return (

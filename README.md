@@ -161,8 +161,8 @@ flint serve
 # 🔐 No web UI passphrase set. Let's set one up for security.
 # Enter passphrase: ********
 
-# Web UI access
-# Visit http://your-server:5550 → Enter passphrase → Full access
+# Web UI access (localhost by default)
+# Visit http://localhost:5550 → Enter passphrase → Full access
 
 # CLI access (uses API key)
 flint vm list --all
@@ -226,9 +226,12 @@ flint storage volume list default # List storage volumes
 
 **4. API Access (for external tools)**
 ```bash
-# Get your API key (requires authentication)
-curl -H "Authorization: Bearer YOUR_API_KEY" http://localhost:5550/api/vms
+# Read the API key locally; it is never returned to browsers
+API_KEY=$(flint api-key)
+curl -H "Authorization: Bearer $API_KEY" http://localhost:5550/api/vms
 ```
+
+Flint binds to `127.0.0.1` by default. For remote access, place it behind an HTTPS reverse proxy and explicitly configure the listen address. Keep `~/.flint/config.json` private: it contains the API key and is written with mode `0600`.
 
 ---
 

@@ -2,6 +2,8 @@ package server
 
 import (
 	"github.com/volantvm/flint/pkg/core"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -163,6 +165,11 @@ func TestValidateUUID(t *testing.T) {
 }
 
 func TestValidateFilePath(t *testing.T) {
+	allowedRoot := t.TempDir()
+	validPath := filepath.Join(allowedRoot, "ubuntu.iso")
+	if err := os.WriteFile(validPath, []byte("test"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	tests := []struct {
 		name    string
 		path    string
@@ -170,13 +177,13 @@ func TestValidateFilePath(t *testing.T) {
 	}{
 		{
 			name:    "valid absolute path",
-			path:    "/var/lib/images/ubuntu.iso",
+			path:    validPath,
 			wantErr: false,
 		},
 		{
-			name:    "valid relative path",
+			name:    "relative path rejected",
 			path:    "./images/ubuntu.iso",
-			wantErr: false,
+			wantErr: true,
 		},
 		{
 			name:    "empty path",
@@ -197,10 +204,40 @@ func TestValidateFilePath(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateFilePath(tt.path)
+			err := validateFilePathWithin(tt.path, []string{allowedRoot})
 			if (err != nil) != tt.wantErr {
 				t.Errorf("validateFilePath() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestDetectSSHKeysReturnsMetadataOnly(t *testing.T) {
+	homeDir := t.TempDir()
+	sshDir := filepath.Join(homeDir, ".ssh")
+	if err := os.Mkdir(sshDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	securePath := filepath.Join(sshDir, "id_ed25519")
+	if err := os.WriteFile(securePath, []byte("PRIVATE KEY MUST NOT BE RETURNED"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	insecurePath := filepath.Join(sshDir, "id_rsa")
+	if err := os.WriteFile(insecurePath, []byte("another secret"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(securePath+".pub", []byte("public key"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	keys := detectSSHKeys(homeDir)
+	if len(keys) != 2 {
+		t.Fatalf("got %d keys, want 2", len(keys))
+	}
+	if keys[0].Path != securePath || keys[0].Name != "id_ed25519" || !keys[0].Secure {
+		t.Fatalf("unexpected secure key metadata: %+v", keys[0])
+	}
+	if keys[1].Path != insecurePath || keys[1].Name != "id_rsa" || keys[1].Secure {
+		t.Fatalf("unexpected insecure key metadata: %+v", keys[1])
 	}
 }
