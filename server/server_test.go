@@ -124,3 +124,23 @@ func TestValidateAuthToken(t *testing.T) {
 		})
 	}
 }
+
+func TestRateLimiterDoesNotThrottleStaticAssets(t *testing.T) {
+	s := &Server{rateLimiters: make(map[string]*rateLimiter)}
+	handler := s.rateLimitMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	for i := 0; i < 250; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/_next/static/app.js", nil)
+		req.RemoteAddr = "127.0.0.1:12345"
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, req)
+		if response.Code != http.StatusOK {
+			t.Fatalf("static request %d returned %d", i+1, response.Code)
+		}
+	}
+	if len(s.rateLimiters) != 0 {
+		t.Fatalf("static requests created %d rate limiters", len(s.rateLimiters))
+	}
+}

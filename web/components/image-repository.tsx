@@ -151,21 +151,29 @@ export function ImageRepository({ onImageSelect, showSelectButton = false }: Ima
     }, 600000)
   }
 
-  const getOSIcon = (os: string) => {
-    switch (os.toLowerCase()) {
-      case 'ubuntu':
-        return '🐧'
-      case 'debian':
-        return '🌀'
-      case 'centos':
-        return '🔴'
-      case 'fedora':
-        return '🎩'
-      case 'alpine':
-        return '🏔️'
-      default:
-        return '💻'
+  const getOSIcon = (os: string, className = "h-5 w-5") => {
+    if (os.toLowerCase() === 'ubuntu') {
+      return <img src="/ubuntu.svg" alt="" aria-hidden="true" className={className} />
     }
+
+    let icon: string
+    switch (os.toLowerCase()) {
+      case 'debian':
+        icon = '🌀'
+        break
+      case 'centos':
+        icon = '🔴'
+        break
+      case 'fedora':
+        icon = '🎩'
+        break
+      case 'alpine':
+        icon = '🏔️'
+        break
+      default:
+        icon = '💻'
+    }
+    return <span className="text-xl leading-none" aria-hidden="true">{icon}</span>
   }
 
   const groupedImages = images.reduce((acc, image) => {
@@ -212,7 +220,7 @@ export function ImageRepository({ onImageSelect, showSelectButton = false }: Ima
         <TabsList className="grid w-full grid-cols-6">
           {Object.keys(groupedImages).map((os) => (
             <TabsTrigger key={os} value={os} className="flex items-center gap-2">
-              <span>{getOSIcon(os)}</span>
+              {getOSIcon(os)}
               {os}
             </TabsTrigger>
           ))}
@@ -229,7 +237,7 @@ export function ImageRepository({ onImageSelect, showSelectButton = false }: Ima
                     <CardHeader className="pb-3">
                       <div className="flex items-start justify-between">
                         <div className="flex items-center gap-2">
-                          <span className="text-2xl">{getOSIcon(image.os)}</span>
+                          {getOSIcon(image.os, "h-7 w-7 shrink-0")}
                           <div>
                             <CardTitle className="text-lg">{image.name}</CardTitle>
                             <CardDescription>{image.version}</CardDescription>

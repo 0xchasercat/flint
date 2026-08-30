@@ -104,10 +104,9 @@ export interface VMAction {
   action: "start" | "stop" | "reboot" | "force-stop" | "pause" | "resume"
 }
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ||
-  (typeof window !== 'undefined' && window.location.hostname !== 'localhost'
-    ? `${window.location.protocol}//${window.location.host}/api`
-    : "http://localhost:5550/api")
+// Use the same origin as the UI so custom bind ports and reverse proxies work
+// without exposing credentials through a cross-origin request.
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "/api"
 
 class APIError extends Error {
   constructor(
@@ -198,7 +197,7 @@ export interface ConnectionConfigRequest {
 export interface SSHKey {
   path: string
   name: string
-  secure: string
+  secure: boolean
 }
 
 // Connection API functions

@@ -672,7 +672,9 @@ func (s *Server) handleVMSerialConsoleWS() http.HandlerFunc {
 
 		// Upgrade HTTP connection to WebSocket
 		upgrader := websocket.Upgrader{
-			CheckOrigin: sameWebSocketOrigin,
+			CheckOrigin: func(r *http.Request) bool {
+				return sameWebSocketOrigin(r, s.trustedOrigins)
+			},
 		}
 
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -1263,29 +1265,38 @@ func (s *Server) handleDetectSSHKey() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		homeDir, err := os.UserHomeDir()
 		if err != nil {
-			http.Error(w, `{"error": "Failed to get user home directory"}`, http.StatusInternalServerError)
+			sendInternalError(w, err)
 			return
 		}
 
-		sshKeyPath := filepath.Join(homeDir, ".ssh", "id_rsa.pub")
-
-		if _, err := os.Stat(sshKeyPath); os.IsNotExist(err) {
-			w.Header().Set("Content-Type", "text/plain")
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(""))
-			return
-		}
-
-		keyContent, err := os.ReadFile(sshKeyPath)
-		if err != nil {
-			http.Error(w, `{"error": "Failed to read SSH key"}`, http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "text/plain")
-		w.WriteHeader(http.StatusOK)
-		w.Write(keyContent)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"keys": detectSSHKeys(homeDir)})
 	}
+}
+
+type sshKeyInfo struct {
+	Path   string `json:"path"`
+	Name   string `json:"name"`
+	Secure bool   `json:"secure"`
+}
+
+// detectSSHKeys returns metadata for conventional private key files. It never
+// reads or returns key contents.
+func detectSSHKeys(homeDir string) []sshKeyInfo {
+	keys := make([]sshKeyInfo, 0)
+	for _, name := range []string{"id_ed25519", "id_ecdsa", "id_rsa"} {
+		path := filepath.Join(homeDir, ".ssh", name)
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		keys = append(keys, sshKeyInfo{
+			Path:   path,
+			Name:   name,
+			Secure: info.Mode().Perm()&0077 == 0,
+		})
+	}
+	return keys
 }
 
 // handleGetVMConsoleStream returns WebSocket connection info for console streaming
@@ -1557,7 +1568,9 @@ func (s *Server) handleVMVNCWebSocket() http.HandlerFunc {
 
 		// Upgrade HTTP connection to WebSocket
 		upgrader := websocket.Upgrader{
-			CheckOrigin: sameWebSocketOrigin,
+			CheckOrigin: func(r *http.Request) bool {
+				return sameWebSocketOrigin(r, s.trustedOrigins)
+			},
 		}
 
 		wsConn, err := upgrader.Upgrade(w, r, nil)

@@ -29,20 +29,22 @@ import (
 )
 
 type Server struct {
-	router           *chi.Mux
-	client           libvirtclient.ClientInterface
-	assets           embed.FS
-	apiKey           string
-	passphraseHash   string
-	rateLimiters     map[string]*rateLimiter
-	rateLimiterMutex sync.RWMutex
-	imageRepo        *imagerepository.ImageRepository
-	sessions         map[string]time.Time // sessionID -> expiry time
-	sessionsMu       sync.RWMutex
-	consoleTokens    map[string]consoleToken
-	consoleTokensMu  sync.Mutex
-	serverRegistry   *serverregistry.Registry
-	connectionPool   *connectionpool.Pool
+	router                *chi.Mux
+	client                libvirtclient.ClientInterface
+	assets                embed.FS
+	apiKey                string
+	passphraseHash        string
+	rateLimiters          map[string]*rateLimiter
+	rateLimiterMutex      sync.RWMutex
+	imageRepo             *imagerepository.ImageRepository
+	sessions              map[string]time.Time // sessionID -> expiry time
+	sessionsMu            sync.RWMutex
+	consoleTokens         map[string]consoleToken
+	consoleTokensMu       sync.Mutex
+	serverRegistry        *serverregistry.Registry
+	connectionPool        *connectionpool.Pool
+	contentSecurityPolicy string
+	trustedOrigins        map[string]struct{}
 }
 
 type consoleToken struct {
@@ -62,14 +64,16 @@ func NewServer(client libvirtclient.ClientInterface, assets embed.FS) *Server {
 	imageRepo := imagerepository.NewImageRepository(imageRepoPath)
 
 	s := &Server{
-		router:         chi.NewRouter(),
-		client:         client,
-		assets:         assets,
-		rateLimiters:   make(map[string]*rateLimiter),
-		imageRepo:      imageRepo,
-		sessions:       make(map[string]time.Time),
-		consoleTokens:  make(map[string]consoleToken),
-		connectionPool: connectionpool.NewPool(30*time.Minute, 5*time.Minute),
+		router:                chi.NewRouter(),
+		client:                client,
+		assets:                assets,
+		rateLimiters:          make(map[string]*rateLimiter),
+		imageRepo:             imageRepo,
+		sessions:              make(map[string]time.Time),
+		consoleTokens:         make(map[string]consoleToken),
+		connectionPool:        connectionpool.NewPool(30*time.Minute, 5*time.Minute),
+		contentSecurityPolicy: buildContentSecurityPolicy(assets),
+		trustedOrigins:        parseTrustedOrigins(os.Getenv("FLINT_TRUSTED_ORIGINS")),
 	}
 	registry, err := serverregistry.NewRegistry("")
 	if err != nil {
@@ -139,6 +143,10 @@ func (s *Server) validateAPIKeyFormat(key string) bool {
 // webAuthMiddleware validates web UI passphrase
 func (s *Server) webAuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isPublicWebAsset(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		// Skip auth for API endpoints (they use API key)
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			next.ServeHTTP(w, r)
@@ -215,7 +223,7 @@ func (s *Server) showLoginForm(w http.ResponseWriter, invalid bool) {
 </head>
 <body>
     <div class="login">
-        <h2>🔐 Flint Web UI</h2>
+        <h2>Flint Web UI</h2>
         %s
         <form method="POST" action="/login">
             <input type="password" name="passphrase" placeholder="Enter passphrase" required>
@@ -273,7 +281,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		// Fallback to session cookie authentication (for web app)
 		cookie, err := r.Cookie("flint_session")
 		if err == nil && s.isValidSession(cookie.Value) {
-			if !sameOriginRequest(r) {
+			if requestNeedsOriginValidation(r.Method) && !sameOriginRequest(r, s.trustedOrigins) {
 				http.Error(w, `{"error": "Cross-origin request rejected"}`, http.StatusForbidden)
 				return
 			}
@@ -290,8 +298,9 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 // rateLimitMiddleware implements rate limiting per client
 func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Skip rate limiting for health check
-		if r.URL.Path == "/api/health" {
+		// Static frontend assets are immutable and may generate many parallel requests.
+		// Limit authentication and API traffic, not normal page rendering.
+		if r.URL.Path == "/api/health" || (r.URL.Path != "/login" && !strings.HasPrefix(r.URL.Path, "/api/")) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -450,52 +459,26 @@ func (s *Server) setupRoutes() {
 	webRouter.Use(s.webAuthMiddleware)
 
 	// Serve static files from embedded assets with middleware
-	webRouter.Get("/*", func(w http.ResponseWriter, r *http.Request) {
-		// Handle embedded assets from web/out/ and web/public/
-		path := strings.TrimPrefix(r.URL.Path, "/")
-		if path == "" {
-			path = "index.html"
+	serveWebAsset := func(w http.ResponseWriter, r *http.Request) {
+		// Handle embedded assets from web/out/ and web/public/.
+		requestPath := strings.TrimPrefix(r.URL.Path, "/")
+		if requestPath == "" {
+			requestPath = "index.html"
 		}
 
-		// First try web/out/ for built files
-		embeddedPath := "web/out/" + path
-		file, err := s.assets.Open(embeddedPath)
+		file, servedPath, err := openWebAsset(s.assets, requestPath)
 		if err != nil {
-			// If not found in web/out/, try web/public/ for static assets
-			publicPath := "web/public/" + path
-			file, err = s.assets.Open(publicPath)
-			if err != nil {
-				// If file not found, try index.html for SPA routing
-				if path != "index.html" {
-					indexFile, indexErr := s.assets.Open("web/out/index.html")
-					if indexErr == nil {
-						defer indexFile.Close()
-						w.Header().Set("Content-Type", "text/html")
-						io.Copy(w, indexFile)
-						return
-					}
-				}
-				http.NotFound(w, r)
-				return
-			}
+			http.NotFound(w, r)
+			return
 		}
 		defer file.Close()
-
-		// Set content type based on file extension
-		if strings.HasSuffix(path, ".css") {
-			w.Header().Set("Content-Type", "text/css")
-		} else if strings.HasSuffix(path, ".js") {
-			w.Header().Set("Content-Type", "application/javascript")
-		} else if strings.HasSuffix(path, ".svg") {
-			w.Header().Set("Content-Type", "image/svg+xml")
-		} else if strings.HasSuffix(path, ".png") {
-			w.Header().Set("Content-Type", "image/png")
-		} else if strings.HasSuffix(path, ".ico") {
-			w.Header().Set("Content-Type", "image/x-icon")
+		w.Header().Set("Content-Type", webContentType(servedPath))
+		if r.Method != http.MethodHead {
+			io.Copy(w, file)
 		}
-
-		io.Copy(w, file)
-	})
+	}
+	webRouter.Get("/*", serveWebAsset)
+	webRouter.Head("/*", serveWebAsset)
 
 	// Mount the web router to handle all non-API routes
 	s.router.Mount("/", webRouter)

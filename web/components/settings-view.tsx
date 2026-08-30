@@ -279,7 +279,7 @@ export function SettingsView() {
                       >
                         {sshKeys.map((key) => (
                           <option key={key.path} value={key.path}>
-                            {key.name} {key.secure === "false" && "(⚠️ insecure permissions)"}
+                            {key.name} {!key.secure && "(⚠️ insecure permissions)"}
                           </option>
                         ))}
                       </select>

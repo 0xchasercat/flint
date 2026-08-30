@@ -211,3 +211,33 @@ func TestValidateFilePath(t *testing.T) {
 		})
 	}
 }
+
+func TestDetectSSHKeysReturnsMetadataOnly(t *testing.T) {
+	homeDir := t.TempDir()
+	sshDir := filepath.Join(homeDir, ".ssh")
+	if err := os.Mkdir(sshDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	securePath := filepath.Join(sshDir, "id_ed25519")
+	if err := os.WriteFile(securePath, []byte("PRIVATE KEY MUST NOT BE RETURNED"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	insecurePath := filepath.Join(sshDir, "id_rsa")
+	if err := os.WriteFile(insecurePath, []byte("another secret"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(securePath+".pub", []byte("public key"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	keys := detectSSHKeys(homeDir)
+	if len(keys) != 2 {
+		t.Fatalf("got %d keys, want 2", len(keys))
+	}
+	if keys[0].Path != securePath || keys[0].Name != "id_ed25519" || !keys[0].Secure {
+		t.Fatalf("unexpected secure key metadata: %+v", keys[0])
+	}
+	if keys[1].Path != insecurePath || keys[1].Name != "id_rsa" || keys[1].Secure {
+		t.Fatalf("unexpected insecure key metadata: %+v", keys[1])
+	}
+}

@@ -603,7 +603,15 @@ Flint stores configuration in `~/.flint/config.json`:
 ### Configuration Options
 - **server.host**: Bind address (use "127.0.0.1" for localhost-only)
 - **server.port**: Port number (default: 5550)
-- **security.passphrase_hash**: SHA256 hash of web UI passphrase
+- **security.passphrase_hash**: bcrypt hash of web UI passphrase
 - **security.rate_limit_***: API rate limiting settings
 - **libvirt.uri**: Libvirt connection URI
 - **logging.level**: Log verbosity (DEBUG, INFO, WARN, ERROR)
+
+The bind address and port can be overridden without editing the configuration file:
+
+```bash
+FLINT_BIND_ADDRESS=127.0.0.1 FLINT_BIND_PORT=5550 flint serve
+```
+
+`FLINT_SERVER_HOST` and `FLINT_SERVER_PORT` remain supported for compatibility, but the `FLINT_BIND_*` variables take precedence. For non-interactive deployments, set `FLINT_PASSPHRASE_FILE` to a mode-`0600` secret file. When a reverse proxy rewrites the upstream `Host`, set `FLINT_TRUSTED_ORIGINS` to the exact browser-facing origin, for example `https://flint.example.com`; separate multiple origins with commas. See `compose.yaml` for a complete Docker Compose deployment.
