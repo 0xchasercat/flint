@@ -9,8 +9,11 @@
   </a>
 </p>
 
-Note: this repository is no longer actively maintained and has been succeeded by https://github.com/0xchasercat/firestone
 ---
+
+Note: this repository is no longer actively maintained and has been succeeded by https://github.com/0xchasercat/firestone
+
+
 # 🌀 Flint — KVM Management, Reimagined
 
 <p align="center">
